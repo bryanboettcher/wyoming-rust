@@ -17,6 +17,7 @@ pub enum SatelliteInput {
     // Hardware
     GpioHigh,
     SilenceTimeout,
+    #[allow(dead_code)] // Used when real ALSA playback reports completion
     PlaybackComplete,
 
     // Server messages
@@ -42,6 +43,7 @@ pub enum Action {
     SendStreamingStopped,
     StartPlayback,
     StopPlayback,
+    SendPlayed,
     SetLed(LedState),
     Reconnect,
 }
@@ -90,6 +92,11 @@ pub fn transition(state: &SatelliteState, input: &SatelliteInput) -> (SatelliteS
             Triggered,
             vec![Action::SetLed(LedState::Cyan)],
         ),
+        // Server-side wake word: server may send voice-started without detection first
+        (Streaming, ServerVoiceStarted) => (
+            Processing,
+            vec![Action::SetLed(LedState::BluePulse)],
+        ),
         (Streaming, ServerPauseSatellite) => (
             Idle,
             vec![Action::StopCapture, Action::SendAudioStop, Action::SendStreamingStopped],
@@ -106,11 +113,16 @@ pub fn transition(state: &SatelliteState, input: &SatelliteInput) -> (SatelliteS
             Responding,
             vec![Action::StopCapture, Action::SetLed(LedState::Green), Action::StartPlayback],
         ),
+        // Pipeline completed with no TTS response (e.g. "OK" with no audio)
+        (Processing, ServerVoiceStopped) => (
+            Idle,
+            vec![Action::StopCapture, Action::SendStreamingStopped, Action::SetLed(LedState::Off)],
+        ),
 
         // ── RESPONDING ────────────────────────────────────
-        (Responding, ServerTtsStop) | (Responding, PlaybackComplete) => (
+        (Responding, ServerTtsStop) | (Responding, ServerVoiceStopped) | (Responding, PlaybackComplete) => (
             Idle,
-            vec![Action::StopPlayback, Action::SendStreamingStopped, Action::SetLed(LedState::Off)],
+            vec![Action::StopPlayback, Action::SendPlayed, Action::SendStreamingStopped, Action::SetLed(LedState::Off)],
         ),
 
         // Default: no transition, no actions

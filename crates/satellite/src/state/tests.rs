@@ -175,10 +175,13 @@ fn streaming_ignores_server_run_satellite() {
 }
 
 #[test]
-fn streaming_ignores_server_voice_started() {
-    assert_no_op(
+fn streaming_voice_started_skips_to_processing() {
+    // Server-side wake word: voice-started arrives without detection first
+    assert_transition(
         SatelliteState::Streaming,
         SatelliteInput::ServerVoiceStarted,
+        SatelliteState::Processing,
+        vec![Action::SetLed(LedState::BluePulse)],
     );
 }
 
@@ -366,10 +369,17 @@ fn processing_ignores_server_tts_stop() {
 }
 
 #[test]
-fn processing_ignores_server_voice_stopped() {
-    assert_no_op(
+fn processing_voice_stopped_returns_to_idle() {
+    // Pipeline completed with no TTS response
+    assert_transition(
         SatelliteState::Processing,
         SatelliteInput::ServerVoiceStopped,
+        SatelliteState::Idle,
+        vec![
+            Action::StopCapture,
+            Action::SendStreamingStopped,
+            Action::SetLed(LedState::Off),
+        ],
     );
 }
 
@@ -385,6 +395,7 @@ fn responding_tts_stop_returns_to_idle() {
         SatelliteState::Idle,
         vec![
             Action::StopPlayback,
+            Action::SendPlayed,
             Action::SendStreamingStopped,
             Action::SetLed(LedState::Off),
         ],
@@ -399,6 +410,7 @@ fn responding_playback_complete_returns_to_idle() {
         SatelliteState::Idle,
         vec![
             Action::StopPlayback,
+            Action::SendPlayed,
             Action::SendStreamingStopped,
             Action::SetLed(LedState::Off),
         ],
@@ -465,10 +477,18 @@ fn responding_ignores_server_tts_start() {
 }
 
 #[test]
-fn responding_ignores_server_voice_stopped() {
-    assert_no_op(
+fn responding_voice_stopped_returns_to_idle() {
+    // voice-stopped is a valid exit from Responding (redundant with TtsStop)
+    assert_transition(
         SatelliteState::Responding,
         SatelliteInput::ServerVoiceStopped,
+        SatelliteState::Idle,
+        vec![
+            Action::StopPlayback,
+            Action::SendPlayed,
+            Action::SendStreamingStopped,
+            Action::SetLed(LedState::Off),
+        ],
     );
 }
 
@@ -526,6 +546,7 @@ fn full_happy_path_conversation() {
         actions,
         vec![
             Action::StopPlayback,
+            Action::SendPlayed,
             Action::SendStreamingStopped,
             Action::SetLed(LedState::Off),
         ]
@@ -752,6 +773,75 @@ fn transition_is_pure_function() {
 
     assert_eq!(state1, state2);
     assert_eq!(actions1, actions2);
+}
+
+#[test]
+fn server_side_wake_word_skips_triggered() {
+    // When the server detects the wake word itself, it sends voice-started
+    // directly without a detection event.
+    let mut state = SatelliteState::Idle;
+
+    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    state = new_state;
+    assert_eq!(state, SatelliteState::Streaming);
+
+    // Server sends voice-started directly (no detection)
+    let (new_state, actions) = transition(&state, &SatelliteInput::ServerVoiceStarted);
+    state = new_state;
+    assert_eq!(state, SatelliteState::Processing);
+    assert_eq!(actions, vec![Action::SetLed(LedState::BluePulse)]);
+
+    // Continue normally
+    let (new_state, _) = transition(&state, &SatelliteInput::ServerTtsStart);
+    state = new_state;
+    assert_eq!(state, SatelliteState::Responding);
+
+    let (new_state, _) = transition(&state, &SatelliteInput::ServerTtsStop);
+    assert_eq!(new_state, SatelliteState::Idle);
+}
+
+#[test]
+fn pipeline_with_no_tts_response() {
+    // Intent handler responds with "OK" but no TTS audio — server sends
+    // voice-stopped without audio-start/audio-stop.
+    let mut state = SatelliteState::Idle;
+
+    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    state = new_state;
+    let (new_state, _) = transition(&state, &SatelliteInput::ServerDetection);
+    state = new_state;
+    let (new_state, _) = transition(&state, &SatelliteInput::ServerVoiceStarted);
+    state = new_state;
+    assert_eq!(state, SatelliteState::Processing);
+
+    // No TTS — server sends voice-stopped directly
+    let (new_state, actions) = transition(&state, &SatelliteInput::ServerVoiceStopped);
+    assert_eq!(new_state, SatelliteState::Idle);
+    assert!(actions.contains(&Action::StopCapture));
+    assert!(actions.contains(&Action::SendStreamingStopped));
+    assert!(actions.contains(&Action::SetLed(LedState::Off)));
+}
+
+#[test]
+fn voice_stopped_exits_responding() {
+    // voice-stopped during Responding is a valid exit (redundant with TtsStop)
+    let mut state = SatelliteState::Idle;
+    let walk = vec![
+        SatelliteInput::GpioHigh,
+        SatelliteInput::ServerDetection,
+        SatelliteInput::ServerVoiceStarted,
+        SatelliteInput::ServerTtsStart,
+    ];
+    for input in &walk {
+        let (new_state, _) = transition(&state, input);
+        state = new_state;
+    }
+    assert_eq!(state, SatelliteState::Responding);
+
+    let (new_state, actions) = transition(&state, &SatelliteInput::ServerVoiceStopped);
+    assert_eq!(new_state, SatelliteState::Idle);
+    assert!(actions.contains(&Action::StopPlayback));
+    assert!(actions.contains(&Action::SendPlayed));
 }
 
 #[test]

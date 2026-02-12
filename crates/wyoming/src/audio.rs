@@ -164,11 +164,14 @@ impl Eventable for AudioStop {
     const EVENT_TYPE: &'static str = "audio-stop";
 
     fn into_event(self) -> Event {
-        let mut data = Map::new();
+        let event = Event::new(Self::EVENT_TYPE);
         if let Some(ts) = self.timestamp {
+            let mut data = Map::new();
             data.insert("timestamp".into(), Value::Number(ts.into()));
+            event.with_data(data)
+        } else {
+            event
         }
-        Event::new(Self::EVENT_TYPE).with_data(data)
     }
 
     fn from_event(event: Event) -> Result<Self, ConversionError> {

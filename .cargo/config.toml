@@ -1,0 +1,20 @@
+# Cross-compilation for Raspberry Pi Zero W v1.1 (ARM1176, ARMv6, hard float)
+#
+# Two ways to use this:
+#
+# 1. Using `cross` (recommended, Docker-based, no host toolchain needed):
+#    cargo install cross --git https://github.com/cross-rs/cross
+#    cross build --release --target arm-unknown-linux-gnueabihf
+#
+# 2. Using native cargo with system-installed cross-compiler:
+#    sudo apt install gcc-arm-linux-gnueabihf
+#    cargo build --release --target arm-unknown-linux-gnueabihf
+#
+# 3. Using Dockerfile.cross (fully self-contained):
+#    docker build -f Dockerfile.cross -t wyoming-satellite-arm .
+#    docker create --name extract wyoming-satellite-arm
+#    docker cp extract:/out/wyoming-satellite .
+#    docker rm extract
+
+[target.arm-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"

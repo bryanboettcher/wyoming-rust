@@ -1,0 +1,81 @@
+# Dockerfile.pi — Runnable ARMv6 image for Raspberry Pi Zero W v1.1
+#
+# The build stage runs on amd64 and cross-compiles to ARM.
+# The runtime stage uses Alpine linux/arm/v6 for a tiny final image.
+#
+# Build:
+#   docker buildx build --platform linux/arm/v6 \
+#     -f Dockerfile.pi -t ghcr.io/bryanboettcher/wyoming-satellite:latest \
+#     --push .
+#
+# Run on Pi Zero W:
+#   docker run --rm -v /path/to/config:/data \
+#     --device /dev/snd \
+#     ghcr.io/bryanboettcher/wyoming-satellite:latest /data/satellite.toml
+
+# ---------------------------------------------------------------------------
+# Stage 1: Cross-compile on amd64 (no QEMU needed)
+# ---------------------------------------------------------------------------
+ARG BUILDPLATFORM=linux/amd64
+FROM --platform=$BUILDPLATFORM rust:1.84-bookworm AS builder
+
+# Install the ARM cross-compilation toolchain (gcc + libc for armhf)
+RUN dpkg --add-architecture armhf \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        gcc-arm-linux-gnueabihf \
+        libc6-dev-armhf-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add the Rust target
+RUN rustup target add arm-unknown-linux-gnueabihf
+
+# Tell cargo which linker to use for this target
+ENV CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+
+WORKDIR /build
+
+# -- Dependency caching layer --
+# Copy manifests first so Docker can cache the dependency build
+COPY Cargo.toml Cargo.lock ./
+COPY crates/wyoming/Cargo.toml crates/wyoming/Cargo.toml
+COPY crates/satellite/Cargo.toml crates/satellite/Cargo.toml
+
+# Create stub sources to let cargo resolve and build dependencies
+RUN mkdir -p crates/wyoming/src crates/satellite/src \
+    && echo "pub fn stub() {}" > crates/wyoming/src/lib.rs \
+    && echo "fn main() {}" > crates/satellite/src/main.rs \
+    && cargo build --release --target arm-unknown-linux-gnueabihf --workspace 2>&1 \
+    && rm -rf crates/wyoming/src crates/satellite/src
+
+# -- Real source build --
+COPY crates/ crates/
+
+# Remove stale fingerprints so cargo rebuilds with real sources
+RUN rm -f target/arm-unknown-linux-gnueabihf/release/wyoming-satellite \
+    && rm -rf target/arm-unknown-linux-gnueabihf/release/.fingerprint/wyoming-* \
+    && cargo build --release --target arm-unknown-linux-gnueabihf --workspace
+
+# Strip the binary for minimal size on Pi Zero
+RUN arm-linux-gnueabihf-strip \
+    target/arm-unknown-linux-gnueabihf/release/wyoming-satellite
+
+# ---------------------------------------------------------------------------
+# Stage 2: Minimal ARMv6 runtime
+# ---------------------------------------------------------------------------
+FROM alpine:3.21
+
+# The cross-compiled binary is dynamically linked against glibc, but Alpine
+# uses musl. Install gcompat (glibc compatibility layer) so the binary runs.
+RUN apk add --no-cache gcompat libgcc
+
+# Copy the cross-compiled binary
+COPY --from=builder \
+    /build/target/arm-unknown-linux-gnueabihf/release/wyoming-satellite \
+    /usr/local/bin/wyoming-satellite
+
+# Config and WAV files are expected to be mounted here
+VOLUME ["/data"]
+
+ENTRYPOINT ["wyoming-satellite"]
+CMD ["/data/satellite.toml"]

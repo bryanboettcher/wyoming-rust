@@ -1,0 +1,16 @@
+# Configuration for `cross` (https://github.com/cross-rs/cross)
+# Usage: cross build --release --target arm-unknown-linux-gnueabihf
+
+[target.arm-unknown-linux-gnueabihf]
+# The default cross image for this target includes the ARM cross-compiler
+# and appropriate sysroot. No custom image needed since we have no C
+# library dependencies beyond libc (which is provided by the sysroot).
+#
+# If we later add ALSA or other native dependencies, we'll need a custom
+# Dockerfile here:
+# image = "wyoming-cross-arm:local"
+# dockerfile = { file = "Dockerfile.cross-env" }
+
+[build]
+# Default target when using `cross build` without --target
+default-target = "arm-unknown-linux-gnueabihf"

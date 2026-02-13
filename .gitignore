@@ -1,2 +1,20 @@
-/target
-Cargo.lock
+# Cargo
+/target/
+
+# Vim
+*.swp
+*.swo
+*~
+
+# IDE
+.idea/
+.vscode/
+.vscode-test/
+*.code-workspace
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

@@ -8,3 +8,12 @@ members = [
 [workspace.package]
 edition = "2021"
 license = "MIT"
+
+# Size-optimized release profile for ARM targets (Pi Zero W has limited resources).
+# Usage: cross build --profile release-arm --target arm-unknown-linux-gnueabihf
+[profile.release-arm]
+inherits = "release"
+strip = true
+lto = true
+opt-level = "s"
+codegen-units = 1

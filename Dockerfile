@@ -18,8 +18,11 @@ RUN mkdir -p crates/wyoming/src crates/satellite/src \
 # Copy real source code
 COPY crates/ crates/
 
-# Rebuild with real sources (deps are cached) and run tests
-RUN cargo test --workspace \
+# Remove stub binaries so cargo rebuilds with real sources.
+# cargo's fingerprinting doesn't always detect that COPY replaced sources.
+RUN rm -f target/release/wyoming-satellite target/release/libwyoming.rlib \
+    && rm -rf target/release/.fingerprint/wyoming-* \
+    && cargo test --workspace \
     && cargo build --release --workspace
 
 # Stage 2: Slim runtime image

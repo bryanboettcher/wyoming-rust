@@ -229,11 +229,13 @@ def handle_satellite(conn, addr):
         print(f"{'='*60}")
         print("✓ Test completed successfully")
         print(f"{'='*60}\n")
+        return True
 
     except Exception as e:
         print(f"\n✗ Error handling satellite: {e}")
         import traceback
         traceback.print_exc()
+        return False
     finally:
         conn.close()
 
@@ -252,10 +254,14 @@ def main():
     print("Waiting for satellite connection...\n")
 
     try:
-        while True:
-            conn, addr = server.accept()
-            handle_satellite(conn, addr)
-            print("Ready for next connection...\n")
+        conn, addr = server.accept()
+        success = handle_satellite(conn, addr)
+        if success:
+            print("Test passed, exiting.")
+            sys.exit(0)
+        else:
+            print("Test failed, exiting.")
+            sys.exit(1)
     except KeyboardInterrupt:
         print("\nShutting down server...")
     finally:

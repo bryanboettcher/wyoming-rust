@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  wyoming-openwakeword:
+    image: rhasspy/wyoming-openwakeword:latest
+    container_name: wyoming-openwakeword
+    ports:
+      - "10400:10400"
+    restart: unless-stopped
+    command: --uri tcp://0.0.0.0:10400
+
+  wyoming-piper:
+    image: rhasspy/wyoming-piper:latest
+    container_name: wyoming-piper
+    ports:
+      - "10200:10200"
+    restart: unless-stopped
+    command: --voice en_US-lessac-medium --uri tcp://0.0.0.0:10200
+
+  mock-server:
+    image: python:3.12-slim
+    container_name: mock-server
+    ports:
+      - "10700:10700"
+    volumes:
+      - ./mock_server.py:/app/mock_server.py:ro
+    working_dir: /app
+    command: python mock_server.py
+
+  satellite:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: wyoming-satellite
+    depends_on:
+      - mock-server
+    volumes:
+      - ./test.wav:/data/test.wav:ro
+      - ./satellite-compose.toml:/data/satellite-compose.toml:ro
+    command: ["/data/satellite-compose.toml"]

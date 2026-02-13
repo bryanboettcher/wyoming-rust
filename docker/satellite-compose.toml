@@ -1,0 +1,21 @@
+[satellite]
+name = "test-satellite"
+area = "Test Room"
+
+[server]
+host = "mock-server"
+port = 10700
+
+[audio]
+wav_input = "/data/test.wav"
+rate = 16000
+width = 2
+channels = 1
+chunk_ms = 20
+
+[gpio]
+auto_trigger = true
+silence_timeout_ms = 3000
+
+[led]
+method = "none"

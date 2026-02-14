@@ -17,6 +17,19 @@ services:
     command: --voice en_US-lessac-medium --uri tcp://0.0.0.0:10200
     profiles: [infra]
 
+  # ── mDNS service advertisement ──────────────────────────────────────────
+
+  avahi:
+    build:
+      context: ./avahi
+    container_name: wyoming-avahi
+    network_mode: host
+    environment:
+      - SATELLITE_NAME=Wyoming Satellite
+      - SATELLITE_PORT=10700
+    restart: unless-stopped
+    profiles: [mdns]
+
   # ── Connect mode test (satellite connects out to mock-server) ──────────
 
   mock-server:

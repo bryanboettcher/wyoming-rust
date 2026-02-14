@@ -59,6 +59,26 @@ impl Connection {
         Ok(conn)
     }
 
+    /// Wrap a pre-accepted TcpStream (listen mode) and handle the describe/info handshake.
+    ///
+    /// In listen mode, the satellite is the TCP server. HA connects to us and
+    /// sends `describe`; we reply with `info` — same handshake as connect mode.
+    pub fn from_stream(
+        stream: TcpStream,
+        sat_info: &SatelliteInfo,
+    ) -> Result<Self, ConnectionError> {
+        stream.set_nodelay(true)?;
+
+        let reader = BufReader::new(stream.try_clone()?);
+        let writer = BufWriter::new(stream);
+        let mut conn = Self { reader, writer };
+
+        // Same handshake: HA sends `describe`, we reply with `info`
+        conn.handle_describe(sat_info)?;
+
+        Ok(conn)
+    }
+
     /// Handle the describe/info handshake.
     fn handle_describe(&mut self, sat_info: &SatelliteInfo) -> Result<(), ConnectionError> {
         let event = event::read_event(&mut self.reader)?;

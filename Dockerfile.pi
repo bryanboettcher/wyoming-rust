@@ -19,21 +19,38 @@
 ARG BUILDPLATFORM=linux/amd64
 FROM --platform=$BUILDPLATFORM rust:1.84-bookworm AS builder
 
-# Install the ARM cross-compilation toolchain (gcc + libc for armhf)
-RUN dpkg --add-architecture armhf \
-    && apt-get update \
+# Install dependencies for downloading the Raspberry Pi toolchain
+RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        gcc-arm-linux-gnueabihf \
-        libc6-dev-armhf-cross \
+        wget \
+        xz-utils \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Download and install ARMv6 cross-compiler toolchain from tttapa/docker-arm-cross-toolchain
+# This is critical - Debian/Ubuntu's gcc-arm-linux-gnueabihf defaults to ARMv7
+# See: https://github.com/tttapa/docker-arm-cross-toolchain
+RUN wget -q https://github.com/tttapa/docker-arm-cross-toolchain/releases/download/1.1.0/x-tools-armv6-rpi-linux-gnueabihf-gcc13.tar.xz \
+    && tar -xJf x-tools-armv6-rpi-linux-gnueabihf-gcc13.tar.xz -C /opt \
+    && rm x-tools-armv6-rpi-linux-gnueabihf-gcc13.tar.xz
+
+# Add the ARMv6 toolchain to PATH
+ENV PATH="/opt/x-tools/armv6-rpi-linux-gnueabihf/bin:${PATH}"
 
 # Add the Rust target
 RUN rustup target add arm-unknown-linux-gnueabihf
 
-# Tell cargo which linker to use for this target
-ENV CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+# Tell cargo which linker to use (ARMv6 toolchain uses armv6-rpi-linux-gnueabihf-gcc)
+ENV CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=armv6-rpi-linux-gnueabihf-gcc
 
 WORKDIR /build
+
+# Create .cargo/config.toml to force ARMv6 code generation
+RUN mkdir -p .cargo && cat > .cargo/config.toml << 'EOF'
+[target.arm-unknown-linux-gnueabihf]
+linker = "armv6-rpi-linux-gnueabihf-gcc"
+rustflags = ["-C", "target-cpu=arm1176jzf-s"]
+EOF
 
 # -- Dependency caching layer --
 # Copy manifests first so Docker can cache the dependency build
@@ -57,7 +74,7 @@ RUN rm -f target/arm-unknown-linux-gnueabihf/release/wyoming-satellite \
     && cargo build --release --target arm-unknown-linux-gnueabihf --workspace
 
 # Strip the binary for minimal size on Pi Zero
-RUN arm-linux-gnueabihf-strip \
+RUN armv6-rpi-linux-gnueabihf-strip \
     target/arm-unknown-linux-gnueabihf/release/wyoming-satellite
 
 # ---------------------------------------------------------------------------

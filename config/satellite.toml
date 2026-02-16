@@ -35,7 +35,20 @@ vad_pin = 17
 silence_timeout_ms = 2500
 auto_trigger = false
 
-[led]
-# Status LED for visual feedback. "spi", "pwm", or "none".
-pin = 10
-method = "spi"
+# Feedback providers for user-facing status indication.
+# Multiple providers can be configured and run simultaneously.
+# If none are specified, a logging-only provider is used by default.
+#
+# WS2812/NeoPixel example:
+# [[feedback]]
+# method = "ws2812"
+# pin = 10
+# led_count = 3
+#
+# Piezo buzzer example:
+# [[feedback]]
+# method = "piezo"
+# pin = 25
+
+[[feedback]]
+method = "log"

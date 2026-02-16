@@ -36,6 +36,7 @@ fn idle_gpio_high_starts_streaming() {
         SatelliteInput::GpioHigh,
         SatelliteState::Streaming,
         vec![
+            Action::SetFeedback(FeedbackState::Listening),
             Action::StartCapture,
             Action::SendAudioStart,
             Action::SendStreamingStarted,
@@ -49,7 +50,7 @@ fn idle_disconnected_stays_idle() {
         SatelliteState::Idle,
         SatelliteInput::Disconnected,
         SatelliteState::Idle,
-        vec![Action::SetLed(LedState::RedBlink), Action::Reconnect],
+        vec![Action::SetFeedback(FeedbackState::Error), Action::Reconnect],
     );
 }
 
@@ -112,7 +113,7 @@ fn streaming_silence_timeout_returns_to_idle() {
             Action::StopCapture,
             Action::SendAudioStop,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ],
     );
 }
@@ -123,7 +124,7 @@ fn streaming_detection_triggers() {
         SatelliteState::Streaming,
         SatelliteInput::ServerDetection,
         SatelliteState::Triggered,
-        vec![Action::SetLed(LedState::Cyan)],
+        vec![Action::SetFeedback(FeedbackState::Detected)],
     );
 }
 
@@ -150,7 +151,7 @@ fn streaming_disconnected_returns_to_idle() {
         vec![
             Action::StopCapture,
             Action::StopPlayback,
-            Action::SetLed(LedState::RedBlink),
+            Action::SetFeedback(FeedbackState::Error),
             Action::Reconnect,
         ],
     );
@@ -181,7 +182,7 @@ fn streaming_voice_started_skips_to_processing() {
         SatelliteState::Streaming,
         SatelliteInput::ServerVoiceStarted,
         SatelliteState::Processing,
-        vec![Action::SetLed(LedState::BluePulse)],
+        vec![Action::SetFeedback(FeedbackState::Processing)],
     );
 }
 
@@ -213,7 +214,7 @@ fn triggered_voice_started_enters_processing() {
         SatelliteState::Triggered,
         SatelliteInput::ServerVoiceStarted,
         SatelliteState::Processing,
-        vec![Action::SetLed(LedState::BluePulse)],
+        vec![Action::SetFeedback(FeedbackState::Processing)],
     );
 }
 
@@ -226,7 +227,7 @@ fn triggered_disconnected_returns_to_idle() {
         vec![
             Action::StopCapture,
             Action::StopPlayback,
-            Action::SetLed(LedState::RedBlink),
+            Action::SetFeedback(FeedbackState::Error),
             Action::Reconnect,
         ],
     );
@@ -298,7 +299,7 @@ fn processing_tts_start_enters_responding() {
         SatelliteState::Responding,
         vec![
             Action::StopCapture,
-            Action::SetLed(LedState::Green),
+            Action::SetFeedback(FeedbackState::Speaking),
             Action::StartPlayback,
         ],
     );
@@ -313,7 +314,7 @@ fn processing_disconnected_returns_to_idle() {
         vec![
             Action::StopCapture,
             Action::StopPlayback,
-            Action::SetLed(LedState::RedBlink),
+            Action::SetFeedback(FeedbackState::Error),
             Action::Reconnect,
         ],
     );
@@ -378,7 +379,7 @@ fn processing_voice_stopped_returns_to_idle() {
         vec![
             Action::StopCapture,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ],
     );
 }
@@ -397,7 +398,7 @@ fn responding_tts_stop_returns_to_idle() {
             Action::StopPlayback,
             Action::SendPlayed,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ],
     );
 }
@@ -412,7 +413,7 @@ fn responding_playback_complete_returns_to_idle() {
             Action::StopPlayback,
             Action::SendPlayed,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ],
     );
 }
@@ -426,7 +427,7 @@ fn responding_disconnected_returns_to_idle() {
         vec![
             Action::StopCapture,
             Action::StopPlayback,
-            Action::SetLed(LedState::RedBlink),
+            Action::SetFeedback(FeedbackState::Error),
             Action::Reconnect,
         ],
     );
@@ -478,7 +479,7 @@ fn responding_ignores_server_tts_start() {
 
 #[test]
 fn responding_voice_stopped_returns_to_idle() {
-    // voice-stopped is a valid exit from Responding (redundant with TtsStop)
+    // voice-stopped during Responding is a valid exit (redundant with TtsStop)
     assert_transition(
         SatelliteState::Responding,
         SatelliteInput::ServerVoiceStopped,
@@ -487,7 +488,7 @@ fn responding_voice_stopped_returns_to_idle() {
             Action::StopPlayback,
             Action::SendPlayed,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ],
     );
 }
@@ -507,6 +508,7 @@ fn full_happy_path_conversation() {
     assert_eq!(
         actions,
         vec![
+            Action::SetFeedback(FeedbackState::Listening),
             Action::StartCapture,
             Action::SendAudioStart,
             Action::SendStreamingStarted,
@@ -517,13 +519,13 @@ fn full_happy_path_conversation() {
     // Wake word detection -> Triggered
     let (new_state, actions) = transition(&state, &SatelliteInput::ServerDetection);
     assert_eq!(new_state, SatelliteState::Triggered);
-    assert_eq!(actions, vec![Action::SetLed(LedState::Cyan)]);
+    assert_eq!(actions, vec![Action::SetFeedback(FeedbackState::Detected)]);
     state = new_state;
 
     // Server starts processing -> Processing
     let (new_state, actions) = transition(&state, &SatelliteInput::ServerVoiceStarted);
     assert_eq!(new_state, SatelliteState::Processing);
-    assert_eq!(actions, vec![Action::SetLed(LedState::BluePulse)]);
+    assert_eq!(actions, vec![Action::SetFeedback(FeedbackState::Processing)]);
     state = new_state;
 
     // TTS starts -> Responding
@@ -533,7 +535,7 @@ fn full_happy_path_conversation() {
         actions,
         vec![
             Action::StopCapture,
-            Action::SetLed(LedState::Green),
+            Action::SetFeedback(FeedbackState::Speaking),
             Action::StartPlayback,
         ]
     );
@@ -548,7 +550,7 @@ fn full_happy_path_conversation() {
             Action::StopPlayback,
             Action::SendPlayed,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ]
     );
 }
@@ -593,7 +595,7 @@ fn timeout_during_streaming() {
             Action::StopCapture,
             Action::SendAudioStop,
             Action::SendStreamingStopped,
-            Action::SetLed(LedState::Off),
+            Action::SetFeedback(FeedbackState::Idle),
         ]
     );
 }
@@ -617,10 +619,10 @@ fn disconnection_from_all_states() {
             state
         );
 
-        // All disconnections should set RedBlink and Reconnect
+        // All disconnections should set Error feedback and Reconnect
         assert!(
-            actions.contains(&Action::SetLed(LedState::RedBlink)),
-            "Disconnection from {:?} should set RedBlink LED",
+            actions.contains(&Action::SetFeedback(FeedbackState::Error)),
+            "Disconnection from {:?} should set Error feedback",
             state
         );
         assert!(
@@ -629,7 +631,7 @@ fn disconnection_from_all_states() {
             state
         );
 
-        // Idle just needs LED and reconnect, others need cleanup
+        // Idle just needs feedback and reconnect, others need cleanup
         if state == SatelliteState::Idle {
             assert_eq!(actions.len(), 2, "Idle disconnection should have 2 actions");
         } else {
@@ -709,7 +711,7 @@ fn recovery_after_disconnection_during_streaming() {
     assert_eq!(new_state, SatelliteState::Streaming);
     assert_eq!(
         actions,
-        vec![Action::StartCapture, Action::SendAudioStart, Action::SendStreamingStarted]
+        vec![Action::SetFeedback(FeedbackState::Listening), Action::StartCapture, Action::SendAudioStart, Action::SendStreamingStarted]
     );
 }
 
@@ -789,7 +791,7 @@ fn server_side_wake_word_skips_triggered() {
     let (new_state, actions) = transition(&state, &SatelliteInput::ServerVoiceStarted);
     state = new_state;
     assert_eq!(state, SatelliteState::Processing);
-    assert_eq!(actions, vec![Action::SetLed(LedState::BluePulse)]);
+    assert_eq!(actions, vec![Action::SetFeedback(FeedbackState::Processing)]);
 
     // Continue normally
     let (new_state, _) = transition(&state, &SatelliteInput::ServerTtsStart);
@@ -819,7 +821,7 @@ fn pipeline_with_no_tts_response() {
     assert_eq!(new_state, SatelliteState::Idle);
     assert!(actions.contains(&Action::StopCapture));
     assert!(actions.contains(&Action::SendStreamingStopped));
-    assert!(actions.contains(&Action::SetLed(LedState::Off)));
+    assert!(actions.contains(&Action::SetFeedback(FeedbackState::Idle)));
 }
 
 #[test]

@@ -8,7 +8,8 @@ use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
 use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError};
-use crate::hardware::{AudioError, AudioSink, AudioSource, GpioInput, LedOutput};
+use crate::feedback::{self, Feedback, FanoutFeedback};
+use crate::hardware::{AudioError, AudioSink, AudioSource, GpioInput};
 use crate::state::{Action, SatelliteInput, SatelliteState};
 
 /// How the satellite establishes its connection to HA.
@@ -28,7 +29,7 @@ pub struct SatelliteService {
     mic: Box<dyn AudioSource>,
     spk: Box<dyn AudioSink>,
     gpio: Box<dyn GpioInput>,
-    led: Box<dyn LedOutput>,
+    feedback: Box<dyn Feedback>,
     audio_format: AudioFormat,
     silence_timeout: Duration,
     last_gpio_high: Instant,
@@ -48,7 +49,7 @@ impl SatelliteService {
         let mic = create_audio_source(config)?;
         let spk = create_audio_sink(config)?;
         let gpio = create_gpio(config);
-        let led = create_led(config);
+        let feedback = create_feedback(config);
 
         let mode = if config.server.mode == "listen" {
             let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -69,7 +70,7 @@ impl SatelliteService {
             mic,
             spk,
             gpio,
-            led,
+            feedback,
             audio_format,
             silence_timeout,
             last_gpio_high: Instant::now(),
@@ -289,9 +290,9 @@ impl SatelliteService {
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(Played)?;
             }
-            Action::SetLed(state) => {
-                log::debug!("Action: SetLed({:?})", state);
-                self.led.set(*state);
+            Action::SetFeedback(state) => {
+                log::debug!("Action: SetFeedback({:?})", state);
+                self.feedback.update(*state);
             }
             Action::Reconnect => {
                 // Should not be called — main loop handles this by returning from session.
@@ -299,6 +300,11 @@ impl SatelliteService {
             }
         }
         Ok(())
+    }
+
+    /// Cleanly shut down all feedback providers.
+    pub fn shutdown(&mut self) {
+        self.feedback.shutdown();
     }
 }
 
@@ -342,11 +348,27 @@ fn create_gpio(config: &Config) -> Box<dyn GpioInput> {
     }
 }
 
-fn create_led(config: &Config) -> Box<dyn LedOutput> {
-    if config.led.method == "none" || config.led.pin.is_none() {
-        Box::new(crate::hardware::StubLed::new())
+fn create_feedback(config: &Config) -> Box<dyn Feedback> {
+    let mut fanout = FanoutFeedback::new();
+
+    if config.feedback.is_empty() {
+        log::info!("No feedback providers configured, using logging only");
+        fanout.add_provider("log", feedback::logging_worker);
     } else {
-        log::warn!("Real LED not implemented, falling back to stub");
-        Box::new(crate::hardware::StubLed::new())
+        for fb_config in &config.feedback {
+            match fb_config.method.as_str() {
+                "log" => {
+                    fanout.add_provider("log", feedback::logging_worker);
+                }
+                other => {
+                    log::warn!(
+                        "Unknown feedback method '{}', skipping. Available: log",
+                        other
+                    );
+                }
+            }
+        }
     }
+
+    Box::new(fanout)
 }

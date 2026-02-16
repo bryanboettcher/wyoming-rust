@@ -1,5 +1,6 @@
 mod config;
 mod connection;
+mod feedback;
 mod hardware;
 mod service;
 mod state;
@@ -9,7 +10,7 @@ use std::time::Duration;
 
 use config::Config;
 use service::SatelliteService;
-use state::{transition, Action, LedState, SatelliteState};
+use state::{transition, Action, FeedbackState, SatelliteState};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -69,7 +70,7 @@ fn run(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_session(service: &mut SatelliteService) {
     let mut state = SatelliteState::Idle;
-    service.execute(&Action::SetLed(LedState::DimWhite)).ok();
+    service.execute(&Action::SetFeedback(FeedbackState::Idle)).ok();
 
     log::info!("Entering main loop (state: Idle)");
 

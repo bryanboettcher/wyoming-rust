@@ -18,5 +18,4 @@ chunk_ms = 20
 auto_trigger = true
 silence_timeout_ms = 3000
 
-[led]
-method = "none"
+# No [[feedback]] configured — defaults to logging-only provider.

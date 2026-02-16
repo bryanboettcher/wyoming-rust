@@ -22,7 +22,7 @@ pub struct Config {
     #[serde(default)]
     pub gpio: GpioConfig,
     #[serde(default)]
-    pub led: LedConfig,
+    pub feedback: Vec<FeedbackConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,27 +136,22 @@ fn default_silence_timeout_ms() -> u64 {
     2500
 }
 
+/// Configuration for a single feedback provider.
+///
+/// Multiple feedback providers can be configured using TOML's [[feedback]] array.
+/// If none are specified, a logging-only provider is used by default.
 #[derive(Debug, Clone, Deserialize)]
-pub struct LedConfig {
+pub struct FeedbackConfig {
+    /// Provider type: "log", "ws2812", "gpio_led", "piezo".
+    pub method: String,
+
+    /// GPIO pin number (for providers that need one).
     #[serde(default)]
     pub pin: Option<u32>,
 
-    /// "spi", "pwm", or "none".
-    #[serde(default = "default_led_method")]
-    pub method: String,
-}
-
-impl Default for LedConfig {
-    fn default() -> Self {
-        Self {
-            pin: None,
-            method: default_led_method(),
-        }
-    }
-}
-
-fn default_led_method() -> String {
-    "none".to_string()
+    /// Number of LEDs (for addressable LED strips like WS2812).
+    #[serde(default)]
+    pub led_count: Option<u32>,
 }
 
 impl Config {
@@ -236,18 +231,22 @@ device = "hw:0,0"
 vad_pin = 17
 silence_timeout_ms = 2500
 
-[led]
+[[feedback]]
+method = "ws2812"
 pin = 10
-method = "spi"
+led_count = 3
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.gpio.vad_pin, Some(17));
-        assert_eq!(config.led.method, "spi");
+        assert_eq!(config.feedback.len(), 1);
+        assert_eq!(config.feedback[0].method, "ws2812");
+        assert_eq!(config.feedback[0].pin, Some(10));
+        assert_eq!(config.feedback[0].led_count, Some(3));
         assert_eq!(config.server.port, 10700); // default
     }
 
     #[test]
-    fn defaults_for_gpio_and_led() {
+    fn defaults_for_gpio_and_feedback() {
         let toml = r#"
 [satellite]
 name = "test"
@@ -260,7 +259,39 @@ wav_input = "test.wav"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.gpio.auto_trigger);
-        assert_eq!(config.led.method, "none");
+        assert!(config.feedback.is_empty());
+    }
+
+    #[test]
+    fn multiple_feedback_providers() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "ws2812"
+pin = 10
+led_count = 3
+
+[[feedback]]
+method = "piezo"
+pin = 25
+
+[[feedback]]
+method = "log"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.feedback.len(), 3);
+        assert_eq!(config.feedback[0].method, "ws2812");
+        assert_eq!(config.feedback[1].method, "piezo");
+        assert_eq!(config.feedback[1].pin, Some(25));
+        assert_eq!(config.feedback[2].method, "log");
     }
 
     #[test]

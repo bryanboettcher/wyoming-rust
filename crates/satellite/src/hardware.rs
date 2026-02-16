@@ -1,8 +1,6 @@
 use std::time::Duration;
 use thiserror::Error;
 
-use crate::state::LedState;
-
 #[derive(Debug, Error)]
 pub enum AudioError {
     #[error("I/O error: {0}")]
@@ -62,15 +60,6 @@ pub trait GpioInput {
     /// Block until the pin goes high or timeout expires.
     /// Returns true if the pin went high, false on timeout.
     fn wait_for_high(&self, timeout: Duration) -> bool;
-}
-
-// ============================================================================
-// LED Output Trait
-// ============================================================================
-
-/// Abstraction over LED control (WS2812 or similar).
-pub trait LedOutput {
-    fn set(&mut self, state: LedState);
 }
 
 // ============================================================================
@@ -279,28 +268,6 @@ impl GpioInput for AutoGpio {
     }
 }
 
-/// Logs LED state changes without controlling real hardware.
-pub struct StubLed {
-    current: LedState,
-}
-
-impl StubLed {
-    pub fn new() -> Self {
-        Self {
-            current: LedState::Off,
-        }
-    }
-}
-
-impl LedOutput for StubLed {
-    fn set(&mut self, state: LedState) {
-        if self.current != state {
-            log::info!("LED: {:?} -> {:?}", self.current, state);
-            self.current = state;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,13 +291,5 @@ mod tests {
     fn auto_gpio_is_always_low() {
         let gpio = AutoGpio::new();
         assert!(!gpio.is_high());
-    }
-
-    #[test]
-    fn stub_led_tracks_state() {
-        let mut led = StubLed::new();
-        led.set(LedState::Cyan);
-        led.set(LedState::Off);
-        // No panic = success. Logging verified manually.
     }
 }

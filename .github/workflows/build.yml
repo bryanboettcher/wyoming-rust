@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/wyoming-satellite
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   # Native build — runs tests

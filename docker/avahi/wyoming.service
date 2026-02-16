@@ -1,0 +1,11 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name>SATELLITE_NAME</name>
+  <service protocol="ipv4">
+    <type>_wyoming._tcp</type>
+    <port>SATELLITE_PORT</port>
+    <txt-record>version=1.5.2</txt-record>
+    <txt-record>protocol=wyoming</txt-record>
+  </service>
+</service-group>

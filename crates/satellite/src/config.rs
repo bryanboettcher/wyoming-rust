@@ -34,9 +34,16 @@ pub struct SatelliteConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
+    /// "listen" (satellite is TCP server, HA connects in) or "connect" (satellite connects out).
+    #[serde(default = "default_mode")]
+    pub mode: String,
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+}
+
+fn default_mode() -> String {
+    "listen".to_string()
 }
 
 fn default_port() -> u16 {
@@ -161,6 +168,12 @@ impl Config {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        if self.server.mode != "listen" && self.server.mode != "connect" {
+            return Err(ConfigError::Invalid(format!(
+                "server.mode must be 'listen' or 'connect', got '{}'",
+                self.server.mode
+            )));
+        }
         if self.audio.device.is_none() && self.audio.wav_input.is_none() {
             return Err(ConfigError::Invalid(
                 "audio config must specify either 'device' or 'wav_input'".into(),
@@ -296,5 +309,56 @@ wav_input = "test.wav"
         };
         // 16000 Hz * 20ms / 1000 = 320 samples * 2 bytes * 1 channel = 640 bytes
         assert_eq!(config.frame_size(), 640);
+    }
+
+    #[test]
+    fn server_mode_defaults_to_listen() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.server.mode, "listen");
+    }
+
+    #[test]
+    fn server_mode_connect_accepted() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+mode = "connect"
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.server.mode, "connect");
+    }
+
+    #[test]
+    fn server_mode_invalid_rejected() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+mode = "push"
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.validate().is_err());
     }
 }

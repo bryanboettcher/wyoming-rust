@@ -1,0 +1,41 @@
+# Wyoming satellite configuration for Raspberry Pi Zero W deployment.
+#
+# Mount this file into the container at /data/satellite.toml:
+#   docker run --rm -v ./config:/data --device /dev/snd \
+#     ghcr.io/bryanboettcher/wyoming-satellite:latest
+#
+# WAV files referenced in this config should also live under /data/.
+
+[satellite]
+name = "my-satellite"
+area = "Living Room"
+
+[server]
+# Wyoming server host — typically your Home Assistant instance or a
+# standalone wyoming-openwakeword / wyoming-piper container.
+host = "homeassistant.local"
+port = 10700
+
+[audio]
+# ALSA capture device on the Pi. Use `arecord -L` to list devices.
+# Common values: "plughw:0,0", "hw:1,0" (for USB mic), "default"
+device = "plughw:0,0"
+
+# PCM format — 16 kHz, 16-bit mono is the Wyoming standard.
+rate = 16000
+width = 2
+channels = 1
+chunk_ms = 20
+
+[gpio]
+# GPIO pin connected to a VAD Schmitt trigger circuit.
+# Set to trigger voice activity detection from hardware.
+# Comment out vad_pin and set auto_trigger = true to skip hardware VAD.
+vad_pin = 17
+silence_timeout_ms = 2500
+auto_trigger = false
+
+[led]
+# Status LED for visual feedback. "spi", "pwm", or "none".
+pin = 10
+method = "spi"

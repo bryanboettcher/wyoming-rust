@@ -6,6 +6,7 @@ services:
       - "10400:10400"
     restart: unless-stopped
     command: --uri tcp://0.0.0.0:10400
+    profiles: [infra]
 
   wyoming-piper:
     image: rhasspy/wyoming-piper:latest
@@ -14,6 +15,22 @@ services:
       - "10200:10200"
     restart: unless-stopped
     command: --voice en_US-lessac-medium --uri tcp://0.0.0.0:10200
+    profiles: [infra]
+
+  # ── mDNS service advertisement ──────────────────────────────────────────
+
+  avahi:
+    build:
+      context: ./avahi
+    container_name: wyoming-avahi
+    network_mode: host
+    environment:
+      - SATELLITE_NAME=Wyoming Satellite
+      - SATELLITE_PORT=10700
+    restart: unless-stopped
+    profiles: [mdns]
+
+  # ── Connect mode test (satellite connects out to mock-server) ──────────
 
   mock-server:
     image: python:3.12-slim
@@ -24,12 +41,13 @@ services:
       - ./mock_server.py:/app/mock_server.py:ro
     working_dir: /app
     command: python -u mock_server.py
+    profiles: [connect]
 
-  satellite:
+  satellite-connect:
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: wyoming-satellite
+    container_name: wyoming-satellite-connect
     depends_on:
       - mock-server
     environment:
@@ -38,3 +56,31 @@ services:
       - ./test.wav:/data/test.wav:ro
       - ./satellite-compose.toml:/data/satellite-compose.toml:ro
     command: ["/data/satellite-compose.toml"]
+    profiles: [connect]
+
+  # ── Listen mode test (satellite listens, mock-client connects in) ──────
+
+  satellite-listen:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: wyoming-satellite-listen
+    ports:
+      - "10700:10700"
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./test.wav:/data/test.wav:ro
+      - ./satellite-listen.toml:/data/satellite-listen.toml:ro
+    command: ["/data/satellite-listen.toml"]
+    profiles: [listen]
+
+  mock-client:
+    image: python:3.12-slim
+    container_name: mock-client
+    depends_on:
+      - satellite-listen
+    volumes:
+      - ./mock_client.py:/scripts/mock_client.py:ro
+    command: ["python", "-u", "/scripts/mock_client.py"]
+    profiles: [listen]

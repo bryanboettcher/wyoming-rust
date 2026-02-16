@@ -349,6 +349,8 @@ fn create_gpio(config: &Config) -> Box<dyn GpioInput> {
 }
 
 fn create_feedback(config: &Config) -> Box<dyn Feedback> {
+    use crate::config::FeedbackProviderConfig;
+
     let mut fanout = FanoutFeedback::new();
 
     if config.feedback.is_empty() {
@@ -356,15 +358,37 @@ fn create_feedback(config: &Config) -> Box<dyn Feedback> {
         fanout.add_provider("log", feedback::logging_worker);
     } else {
         for fb_config in &config.feedback {
-            match fb_config.method.as_str() {
-                "log" => {
+            match fb_config {
+                FeedbackProviderConfig::Log {} => {
                     fanout.add_provider("log", feedback::logging_worker);
                 }
-                other => {
-                    log::warn!(
-                        "Unknown feedback method '{}', skipping. Available: log",
-                        other
-                    );
+                FeedbackProviderConfig::Console { output, states } => {
+                    let output = output.clone();
+                    let states = states.clone();
+                    fanout.add_provider("console", move |rx| {
+                        feedback::console::worker(rx, &output, &states);
+                    });
+                }
+                FeedbackProviderConfig::Pwm { pin, states } => {
+                    let pin = *pin;
+                    let states = states.clone();
+                    fanout.add_provider("pwm", move |rx| {
+                        feedback::pwm::worker(rx, pin, &states);
+                    });
+                }
+                FeedbackProviderConfig::Neopixel {
+                    pin,
+                    led_count,
+                    spi_device,
+                    states,
+                } => {
+                    let pin = *pin;
+                    let led_count = *led_count;
+                    let spi_device = spi_device.clone();
+                    let states = states.clone();
+                    fanout.add_provider("neopixel", move |rx| {
+                        feedback::neopixel::worker(rx, pin, led_count, spi_device.as_deref(), &states);
+                    });
                 }
             }
         }

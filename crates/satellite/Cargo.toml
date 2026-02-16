@@ -19,5 +19,6 @@ toml = "0.8"
 thiserror = "2"
 hound = "3"
 libc = "0.2"
+rppal = "0.19"
 
 [dev-dependencies]

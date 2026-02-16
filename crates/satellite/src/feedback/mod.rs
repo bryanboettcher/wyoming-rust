@@ -1,3 +1,7 @@
+pub mod console;
+pub mod neopixel;
+pub mod pwm;
+
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 

@@ -22,7 +22,7 @@ pub struct Config {
     #[serde(default)]
     pub gpio: GpioConfig,
     #[serde(default)]
-    pub feedback: Vec<FeedbackConfig>,
+    pub feedback: Vec<FeedbackProviderConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,22 +136,168 @@ fn default_silence_timeout_ms() -> u64 {
     2500
 }
 
-/// Configuration for a single feedback provider.
+// ============================================================================
+// Feedback Provider Configuration
+// ============================================================================
+
+/// Per-state effect configuration container. Reused across all provider types.
+/// Each field corresponds to a `FeedbackState` variant. `None` = noop for that state.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(bound(deserialize = "T: serde::de::DeserializeOwned"))]
+pub struct StateEffects<T> {
+    #[serde(default)]
+    pub idle: Option<T>,
+    #[serde(default)]
+    pub listening: Option<T>,
+    #[serde(default)]
+    pub detected: Option<T>,
+    #[serde(default)]
+    pub processing: Option<T>,
+    #[serde(default)]
+    pub speaking: Option<T>,
+    #[serde(default)]
+    pub error: Option<T>,
+}
+
+// Manual Default — avoids requiring T: Default
+impl<T> Default for StateEffects<T> {
+    fn default() -> Self {
+        Self {
+            idle: None,
+            listening: None,
+            detected: None,
+            processing: None,
+            speaking: None,
+            error: None,
+        }
+    }
+}
+
+impl<T> StateEffects<T> {
+    pub fn get(&self, state: crate::state::FeedbackState) -> Option<&T> {
+        use crate::state::FeedbackState;
+        match state {
+            FeedbackState::Idle => self.idle.as_ref(),
+            FeedbackState::Listening => self.listening.as_ref(),
+            FeedbackState::Detected => self.detected.as_ref(),
+            FeedbackState::Processing => self.processing.as_ref(),
+            FeedbackState::Speaking => self.speaking.as_ref(),
+            FeedbackState::Error => self.error.as_ref(),
+        }
+    }
+}
+
+/// Feedback provider configuration. Discriminated by the `method` field.
 ///
-/// Multiple feedback providers can be configured using TOML's [[feedback]] array.
+/// Multiple providers can be configured using TOML's `[[feedback]]` array.
 /// If none are specified, a logging-only provider is used by default.
 #[derive(Debug, Clone, Deserialize)]
-pub struct FeedbackConfig {
-    /// Provider type: "log", "ws2812", "gpio_led", "piezo".
-    pub method: String,
+#[serde(tag = "method")]
+pub enum FeedbackProviderConfig {
+    /// Logs state transitions via the `log` crate. No per-state config needed.
+    #[serde(rename = "log")]
+    Log {},
 
-    /// GPIO pin number (for providers that need one).
-    #[serde(default)]
-    pub pin: Option<u32>,
+    /// Prints per-state templates to stdout or stderr.
+    #[serde(rename = "console")]
+    Console {
+        #[serde(default = "default_console_output")]
+        output: String,
+        #[serde(default)]
+        states: StateEffects<ConsoleEffect>,
+    },
 
-    /// Number of LEDs (for addressable LED strips like WS2812).
+    /// Software PWM on a single GPIO pin. Covers LEDs (>1kHz) and buzzers (audible).
+    #[serde(rename = "pwm")]
+    Pwm {
+        pin: u32,
+        #[serde(default)]
+        states: StateEffects<PwmEffect>,
+    },
+
+    /// WS2812/NeoPixel addressable RGB strip via SPI.
+    #[serde(rename = "neopixel")]
+    Neopixel {
+        pin: u32,
+        led_count: u32,
+        #[serde(default)]
+        spi_device: Option<String>,
+        #[serde(default)]
+        states: StateEffects<NeopixelEffect>,
+    },
+}
+
+fn default_console_output() -> String {
+    "stdout".to_string()
+}
+
+// ── Per-provider effect configs ──────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConsoleEffect {
+    pub template: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PwmEffect {
+    #[serde(default = "default_pwm_effect")]
+    pub effect: PwmEffectType,
+    #[serde(default = "default_pwm_frequency")]
+    pub frequency: f64,
+    #[serde(default = "default_pwm_duty")]
+    pub duty: f64,
     #[serde(default)]
-    pub led_count: Option<u32>,
+    pub period_ms: Option<u64>,
+    #[serde(default)]
+    pub count: Option<u32>,
+    #[serde(default)]
+    pub pulse_ms: Option<u64>,
+}
+
+fn default_pwm_effect() -> PwmEffectType {
+    PwmEffectType::Solid
+}
+fn default_pwm_frequency() -> f64 {
+    1000.0
+}
+fn default_pwm_duty() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PwmEffectType {
+    Off,
+    Solid,
+    Breathe,
+    Blink,
+    Pulse,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NeopixelEffect {
+    #[serde(default = "default_neopixel_effect")]
+    pub effect: NeopixelEffectType,
+    #[serde(default)]
+    pub color: Option<u32>,
+    #[serde(default)]
+    pub period_ms: Option<u64>,
+    #[serde(default)]
+    pub brightness: Option<f64>,
+}
+
+fn default_neopixel_effect() -> NeopixelEffectType {
+    NeopixelEffectType::Solid
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NeopixelEffectType {
+    Off,
+    Solid,
+    Breathe,
+    Rainbow,
+    Blink,
 }
 
 impl Config {
@@ -232,16 +378,20 @@ vad_pin = 17
 silence_timeout_ms = 2500
 
 [[feedback]]
-method = "ws2812"
+method = "neopixel"
 pin = 10
 led_count = 3
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.gpio.vad_pin, Some(17));
         assert_eq!(config.feedback.len(), 1);
-        assert_eq!(config.feedback[0].method, "ws2812");
-        assert_eq!(config.feedback[0].pin, Some(10));
-        assert_eq!(config.feedback[0].led_count, Some(3));
+        match &config.feedback[0] {
+            FeedbackProviderConfig::Neopixel { pin, led_count, .. } => {
+                assert_eq!(*pin, 10);
+                assert_eq!(*led_count, 3);
+            }
+            other => panic!("expected Neopixel, got {:?}", other),
+        }
         assert_eq!(config.server.port, 10700); // default
     }
 
@@ -275,12 +425,12 @@ host = "localhost"
 wav_input = "test.wav"
 
 [[feedback]]
-method = "ws2812"
+method = "neopixel"
 pin = 10
 led_count = 3
 
 [[feedback]]
-method = "piezo"
+method = "pwm"
 pin = 25
 
 [[feedback]]
@@ -288,10 +438,243 @@ method = "log"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.feedback.len(), 3);
-        assert_eq!(config.feedback[0].method, "ws2812");
-        assert_eq!(config.feedback[1].method, "piezo");
-        assert_eq!(config.feedback[1].pin, Some(25));
-        assert_eq!(config.feedback[2].method, "log");
+        assert!(matches!(&config.feedback[0], FeedbackProviderConfig::Neopixel { pin: 10, led_count: 3, .. }));
+        assert!(matches!(&config.feedback[1], FeedbackProviderConfig::Pwm { pin: 25, .. }));
+        assert!(matches!(&config.feedback[2], FeedbackProviderConfig::Log {}));
+    }
+
+    #[test]
+    fn console_provider_with_states() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "console"
+output = "stderr"
+
+[feedback.states]
+idle = { template = "Ready" }
+listening = { template = "Listening..." }
+detected = { template = "Wake word!" }
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.feedback.len(), 1);
+        match &config.feedback[0] {
+            FeedbackProviderConfig::Console { output, states } => {
+                assert_eq!(output, "stderr");
+                assert_eq!(states.idle.as_ref().unwrap().template, "Ready");
+                assert_eq!(states.listening.as_ref().unwrap().template, "Listening...");
+                assert_eq!(states.detected.as_ref().unwrap().template, "Wake word!");
+                assert!(states.processing.is_none());
+                assert!(states.speaking.is_none());
+                assert!(states.error.is_none());
+            }
+            other => panic!("expected Console, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pwm_provider_with_effects() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "pwm"
+pin = 24
+
+[feedback.states.listening]
+effect = "breathe"
+frequency = 1000.0
+period_ms = 2000
+
+[feedback.states.detected]
+effect = "solid"
+frequency = 880.0
+duty = 0.5
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.feedback[0] {
+            FeedbackProviderConfig::Pwm { pin, states } => {
+                assert_eq!(*pin, 24);
+                let listening = states.listening.as_ref().unwrap();
+                assert_eq!(listening.effect, PwmEffectType::Breathe);
+                assert_eq!(listening.frequency, 1000.0);
+                assert_eq!(listening.period_ms, Some(2000));
+                let detected = states.detected.as_ref().unwrap();
+                assert_eq!(detected.effect, PwmEffectType::Solid);
+                assert_eq!(detected.frequency, 880.0);
+                assert_eq!(detected.duty, 0.5);
+            }
+            other => panic!("expected Pwm, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn neopixel_provider_with_hex_colors() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "neopixel"
+pin = 8
+led_count = 3
+
+[feedback.states.idle]
+effect = "solid"
+color = 0x000800
+brightness = 0.1
+
+[feedback.states.detected]
+effect = "rainbow"
+period_ms = 1000
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.feedback[0] {
+            FeedbackProviderConfig::Neopixel { pin, led_count, states, .. } => {
+                assert_eq!(*pin, 8);
+                assert_eq!(*led_count, 3);
+                let idle = states.idle.as_ref().unwrap();
+                assert_eq!(idle.effect, NeopixelEffectType::Solid);
+                assert_eq!(idle.color, Some(0x000800));
+                assert_eq!(idle.brightness, Some(0.1));
+                let detected = states.detected.as_ref().unwrap();
+                assert_eq!(detected.effect, NeopixelEffectType::Rainbow);
+                assert_eq!(detected.period_ms, Some(1000));
+                assert!(detected.color.is_none());
+            }
+            other => panic!("expected Neopixel, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unknown_feedback_method_rejected_at_parse() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "unknown_thing"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn two_neopixel_strips() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "neopixel"
+pin = 8
+led_count = 3
+
+[[feedback]]
+method = "neopixel"
+pin = 10
+led_count = 12
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.feedback.len(), 2);
+        match (&config.feedback[0], &config.feedback[1]) {
+            (
+                FeedbackProviderConfig::Neopixel { pin: p1, led_count: l1, .. },
+                FeedbackProviderConfig::Neopixel { pin: p2, led_count: l2, .. },
+            ) => {
+                assert_eq!(*p1, 8);
+                assert_eq!(*l1, 3);
+                assert_eq!(*p2, 10);
+                assert_eq!(*l2, 12);
+            }
+            other => panic!("expected two Neopixels, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn state_effects_get_maps_correctly() {
+        use crate::state::FeedbackState;
+
+        let effects = StateEffects {
+            idle: Some(ConsoleEffect { template: "idle".into() }),
+            listening: Some(ConsoleEffect { template: "listening".into() }),
+            detected: None,
+            processing: None,
+            speaking: None,
+            error: Some(ConsoleEffect { template: "error".into() }),
+        };
+
+        assert_eq!(effects.get(FeedbackState::Idle).unwrap().template, "idle");
+        assert_eq!(effects.get(FeedbackState::Listening).unwrap().template, "listening");
+        assert!(effects.get(FeedbackState::Detected).is_none());
+        assert!(effects.get(FeedbackState::Processing).is_none());
+        assert!(effects.get(FeedbackState::Speaking).is_none());
+        assert_eq!(effects.get(FeedbackState::Error).unwrap().template, "error");
+    }
+
+    #[test]
+    fn pwm_effect_defaults() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[[feedback]]
+method = "pwm"
+pin = 24
+
+[feedback.states.listening]
+effect = "breathe"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.feedback[0] {
+            FeedbackProviderConfig::Pwm { states, .. } => {
+                let listening = states.listening.as_ref().unwrap();
+                assert_eq!(listening.effect, PwmEffectType::Breathe);
+                assert_eq!(listening.frequency, 1000.0); // default
+                assert_eq!(listening.duty, 1.0); // default
+                assert!(listening.period_ms.is_none());
+            }
+            other => panic!("expected Pwm, got {:?}", other),
+        }
     }
 
     #[test]

@@ -35,20 +35,83 @@ vad_pin = 17
 silence_timeout_ms = 2500
 auto_trigger = false
 
-# Feedback providers for user-facing status indication.
-# Multiple providers can be configured and run simultaneously.
-# If none are specified, a logging-only provider is used by default.
+# ============================================================================
+# Feedback providers
+# ============================================================================
+# Multiple providers can run simultaneously. If none are specified, a
+# logging-only provider is used by default.
 #
-# WS2812/NeoPixel example:
-# [[feedback]]
-# method = "ws2812"
-# pin = 10
-# led_count = 3
+# Available methods: "log", "console", "pwm", "neopixel"
 #
-# Piezo buzzer example:
-# [[feedback]]
-# method = "piezo"
-# pin = 25
+# Each provider supports per-state configuration via a [feedback.states]
+# sub-table. States: idle, listening, detected, processing, speaking, error.
+# Unconfigured states are noops.
 
+# Always-on log provider (state transitions to env_logger)
 [[feedback]]
 method = "log"
+
+# Console output example:
+# [[feedback]]
+# method = "console"
+# output = "stdout"
+#
+# [feedback.states]
+# idle = { template = "Ready and waiting" }
+# listening = { template = "Listening..." }
+# detected = { template = "Wake word detected!" }
+# processing = { template = "Processing..." }
+# speaking = { template = "Speaking response" }
+# error = { template = "ERROR: disconnected" }
+
+# PWM LED example (single-color LED on GPIO 24):
+# [[feedback]]
+# method = "pwm"
+# pin = 24
+#
+# [feedback.states.idle]
+# effect = "off"
+#
+# [feedback.states.listening]
+# effect = "breathe"
+# frequency = 1000.0
+# period_ms = 2000
+#
+# [feedback.states.detected]
+# effect = "solid"
+# frequency = 1000.0
+
+# PWM buzzer example (piezo on GPIO 25):
+# [[feedback]]
+# method = "pwm"
+# pin = 25
+#
+# [feedback.states.detected]
+# effect = "pulse"
+# frequency = 880.0
+# count = 2
+# pulse_ms = 150
+
+# NeoPixel/WS2812 RGB strip example (3 LEDs via SPI):
+# [[feedback]]
+# method = "neopixel"
+# pin = 8
+# led_count = 3
+#
+# [feedback.states.idle]
+# effect = "solid"
+# color = 0x000800
+# brightness = 0.1
+#
+# [feedback.states.listening]
+# effect = "breathe"
+# color = 0x000080
+# period_ms = 2000
+#
+# [feedback.states.detected]
+# effect = "rainbow"
+# period_ms = 1000
+#
+# [feedback.states.speaking]
+# effect = "solid"
+# color = 0x800080

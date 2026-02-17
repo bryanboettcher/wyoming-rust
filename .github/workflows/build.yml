@@ -65,9 +65,10 @@ jobs:
         include:
           - target: arm-unknown-linux-gnueabihf
             tag: armv6
-            # debian:bookworm-slim has no linux/arm/v6 manifest; use arm/v5 instead.
-            # Docker clients on arm/v6 devices (Pi Zero W) fall back to arm/v5 automatically.
-            platform: linux/arm/v5
+            # The binary is compiled for armhf (hard float) which needs /lib/ld-linux-armhf.so.3.
+            # linux/arm/v5 is armel (soft float) with a different dynamic linker, causing exec failures.
+            # linux/arm/v7 is Debian's armhf variant; Pi Zero W Docker clients fall back to it from v6.
+            platform: linux/arm/v7
             build-args: |
               RUST_TARGET=arm-unknown-linux-gnueabihf
               USE_ARMV6_TOOLCHAIN=1

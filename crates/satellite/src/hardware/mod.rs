@@ -1,5 +1,8 @@
+pub mod alsa;
+
 use std::time::Duration;
 use thiserror::Error;
+use wyoming::audio::AudioFormat;
 
 #[derive(Debug, Error)]
 pub enum AudioError {
@@ -14,6 +17,9 @@ pub enum AudioError {
 
     #[error("audio device not available: {0}")]
     DeviceUnavailable(String),
+
+    #[error("ALSA error: {0}")]
+    Alsa(String),
 }
 
 // ============================================================================
@@ -41,8 +47,9 @@ pub trait AudioSink {
     /// Write one frame of PCM audio to the output.
     fn write_frame(&mut self, pcm: &[u8]) -> Result<(), AudioError>;
 
-    /// Prepare the audio sink for playback.
-    fn start(&mut self) -> Result<(), AudioError>;
+    /// Prepare the audio sink for playback with the given format.
+    /// The format comes from the server's `audio-start` event (TTS rate/channels).
+    fn start(&mut self, format: AudioFormat) -> Result<(), AudioError>;
 
     /// Stop playback.
     fn stop(&mut self) -> Result<(), AudioError>;
@@ -168,7 +175,7 @@ impl AudioSink for NullSink {
     fn write_frame(&mut self, _pcm: &[u8]) -> Result<(), AudioError> {
         Ok(())
     }
-    fn start(&mut self) -> Result<(), AudioError> {
+    fn start(&mut self, _format: AudioFormat) -> Result<(), AudioError> {
         log::debug!("NullSink: started");
         Ok(())
     }
@@ -228,7 +235,7 @@ impl AudioSink for WavFileSink {
         Ok(())
     }
 
-    fn start(&mut self) -> Result<(), AudioError> {
+    fn start(&mut self, _format: AudioFormat) -> Result<(), AudioError> {
         log::debug!("WavFileSink: started");
         Ok(())
     }
@@ -275,7 +282,7 @@ mod tests {
     #[test]
     fn null_sink_accepts_all_frames() {
         let mut sink = NullSink;
-        sink.start().unwrap();
+        sink.start(AudioFormat::WYOMING_DEFAULT).unwrap();
         sink.write_frame(&[0u8; 640]).unwrap();
         sink.write_frame(&[0u8; 320]).unwrap();
         sink.stop().unwrap();

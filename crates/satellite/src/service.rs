@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 use wyoming::audio::{AudioChunk, AudioFormat, AudioStart, AudioStop};
-use wyoming::event::ProtocolError;
+use wyoming::event::{Eventable, ProtocolError};
 use wyoming::info::SatelliteInfo;
 use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
@@ -31,6 +31,9 @@ pub struct SatelliteService {
     gpio: Box<dyn GpioInput>,
     feedback: Box<dyn Feedback>,
     audio_format: AudioFormat,
+    /// Format from the most recent server `audio-start` event (TTS playback).
+    /// Defaults to the capture format; updated when the server sends audio-start.
+    playback_format: AudioFormat,
     silence_timeout: Duration,
     last_gpio_high: Instant,
     config: Config,
@@ -43,7 +46,9 @@ impl SatelliteService {
             name: config.satellite.name.clone(),
             area: config.satellite.area.clone(),
             has_mic: true,
-            has_snd: config.audio.wav_output.is_some() || config.audio.device.is_some(),
+            has_snd: config.audio.playback_device.is_some()
+                || config.audio.wav_output.is_some()
+                || config.audio.device.is_some(),
         };
 
         let mic = create_audio_source(config)?;
@@ -72,6 +77,7 @@ impl SatelliteService {
             gpio,
             feedback,
             audio_format,
+            playback_format: audio_format,
             silence_timeout,
             last_gpio_high: Instant::now(),
             config: config.clone(),
@@ -97,6 +103,33 @@ impl SatelliteService {
         Ok(())
     }
 
+    /// Intercept server events to capture playback format, then delegate to
+    /// `map_server_event()` for state machine input mapping.
+    fn handle_server_event(
+        &mut self,
+        event: &wyoming::event::Event,
+    ) -> Option<SatelliteInput> {
+        // Capture AudioFormat from audio-start events for playback configuration
+        if event.event_type == AudioStart::EVENT_TYPE {
+            match AudioStart::from_event(event.clone()) {
+                Ok(start) => {
+                    log::info!(
+                        "TTS playback format: {}Hz {}bit {}ch",
+                        start.format.rate,
+                        start.format.width * 8,
+                        start.format.channels
+                    );
+                    self.playback_format = start.format;
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse audio-start format: {}, using default", e);
+                }
+            }
+        }
+
+        map_server_event(event)
+    }
+
     /// Get the next state-machine input based on current state.
     ///
     /// Returns `Ok(None)` when there is no event to process yet (e.g. audio-chunk
@@ -119,7 +152,7 @@ impl SatelliteService {
                 // Check for server messages (non-blocking)
                 match conn.try_read_event() {
                     Ok(Some(event)) => {
-                        if let Some(input) = map_server_event(&event) {
+                        if let Some(input) = self.handle_server_event(&event) {
                             return Ok(Some(input));
                         }
                     }
@@ -162,7 +195,7 @@ impl SatelliteService {
                                 return Ok(Some(SatelliteInput::Disconnected));
                             }
                         };
-                        if let Some(input) = map_server_event(&event) {
+                        if let Some(input) = self.handle_server_event(&event) {
                             return Ok(Some(input));
                         }
                         return Ok(None);
@@ -190,7 +223,7 @@ impl SatelliteService {
                 // 4. Check for server message (non-blocking)
                 match conn.try_read_event() {
                     Ok(Some(event)) => {
-                        if let Some(input) = map_server_event(&event) {
+                        if let Some(input) = self.handle_server_event(&event) {
                             return Ok(Some(input));
                         }
                     }
@@ -231,7 +264,7 @@ impl SatelliteService {
                 }
 
                 // Map other events to state machine inputs
-                if let Some(input) = map_server_event(&event) {
+                if let Some(input) = self.handle_server_event(&event) {
                     return Ok(Some(input));
                 }
 
@@ -278,8 +311,9 @@ impl SatelliteService {
                 conn.send(StreamingStopped)?;
             }
             Action::StartPlayback => {
-                log::debug!("Action: StartPlayback");
-                self.spk.start()?;
+                log::debug!("Action: StartPlayback (format: {}Hz {}ch)",
+                    self.playback_format.rate, self.playback_format.channels);
+                self.spk.start(self.playback_format)?;
             }
             Action::StopPlayback => {
                 log::debug!("Action: StopPlayback");
@@ -322,13 +356,23 @@ fn create_audio_source(
             config.audio.chunk_ms,
         )?;
         Ok(Box::new(source))
+    } else if let Some(ref device) = config.audio.device {
+        let source = crate::hardware::alsa::AlsaSource::new(
+            device,
+            config.audio.rate,
+            config.audio.channels,
+            config.audio.frame_size(),
+        );
+        Ok(Box::new(source))
     } else {
-        Err("ALSA audio source not yet implemented. Use wav_input for testing.".into())
+        Err("audio config must specify either 'device' or 'wav_input'".into())
     }
 }
 
 fn create_audio_sink(config: &Config) -> Result<Box<dyn AudioSink>, Box<dyn std::error::Error>> {
-    if let Some(ref wav_path) = config.audio.wav_output {
+    if let Some(ref device) = config.audio.playback_device {
+        Ok(Box::new(crate::hardware::alsa::AlsaSink::new(device)))
+    } else if let Some(ref wav_path) = config.audio.wav_output {
         Ok(Box::new(crate::hardware::WavFileSink::new(
             wav_path,
             config.audio.rate,

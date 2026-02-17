@@ -1,0 +1,19 @@
+# Cross-compilation environment with ALSA dev headers for ARMv6 (Pi Zero W).
+#
+# Used by `cross` via Cross.toml. Extends the default cross image with
+# libasound2-dev for the ARM hard-float sysroot.
+ARG CROSS_BASE_IMAGE
+FROM ${CROSS_BASE_IMAGE}
+
+# Install ALSA dev headers for the target architecture.
+# The cross base image already has dpkg configured for armhf.
+RUN dpkg --add-architecture armhf && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libasound2-dev:armhf \
+        pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
+# Tell pkg-config where to find the cross-compiled ALSA .pc files
+ENV PKG_CONFIG_PATH_arm_unknown_linux_gnueabihf=/usr/lib/arm-linux-gnueabihf/pkgconfig
+ENV PKG_CONFIG_ALLOW_CROSS=1

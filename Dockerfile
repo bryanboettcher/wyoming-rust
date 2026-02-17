@@ -14,25 +14,29 @@
 #     --build-arg LINKER=armv6-rpi-linux-gnueabihf-gcc \
 #     --build-arg STRIP_CMD=armv6-rpi-linux-gnueabihf-strip \
 #     --build-arg RUSTFLAGS_EXTRA="-C target-cpu=arm1176jzf-s" \
+#     --build-arg CROSS_PKG_CONFIG_LIBDIR=/opt/x-tools/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot/usr/lib/pkgconfig \
 #     -t wyoming-satellite:armv6 .
 #
 # ARMv7 (Raspberry Pi 2/3/4):
 #   docker build --build-arg RUST_TARGET=armv7-unknown-linux-gnueabihf \
-#     --build-arg CROSS_PKG="gcc-arm-linux-gnueabihf libc6-dev-armhf-cross" \
+#     --build-arg CROSS_PKG="gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libasound2-dev:armhf" \
 #     --build-arg LINKER=arm-linux-gnueabihf-gcc \
 #     --build-arg STRIP_CMD=arm-linux-gnueabihf-strip \
+#     --build-arg CROSS_PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig \
 #     -t wyoming-satellite:armv7 .
 #
 # ARM64 (Raspberry Pi 3/4/5):
 #   docker build --build-arg RUST_TARGET=aarch64-unknown-linux-gnu \
-#     --build-arg CROSS_PKG="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" \
+#     --build-arg CROSS_PKG="gcc-aarch64-linux-gnu libc6-dev-arm64-cross libasound2-dev:arm64" \
 #     --build-arg LINKER=aarch64-linux-gnu-gcc \
 #     --build-arg STRIP_CMD=aarch64-linux-gnu-strip \
+#     --build-arg CROSS_PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig \
 #     -t wyoming-satellite:arm64 .
 #
 # i686 (32-bit x86):
 #   docker build --build-arg RUST_TARGET=i686-unknown-linux-gnu \
-#     --build-arg CROSS_PKG="gcc-multilib libc6-dev-i386" \
+#     --build-arg CROSS_PKG="gcc-multilib libc6-dev-i386 libasound2-dev:i386" \
+#     --build-arg CROSS_PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig \
 #     -t wyoming-satellite:i686 .
 
 # ---------------------------------------------------------------------------
@@ -46,6 +50,12 @@ ARG STRIP_CMD=strip
 ARG RUSTFLAGS_EXTRA=""
 ARG CROSS_PKG=""
 ARG USE_ARMV6_TOOLCHAIN=""
+ARG CROSS_PKG_CONFIG_LIBDIR=""
+
+# Install native ALSA dev headers (needed for native builds and as fallback)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libasound2-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install ARMv6 toolchain (Pi Zero W) if requested
 # Debian/Ubuntu's gcc-arm-linux-gnueabihf defaults to ARMv7, which won't
@@ -66,8 +76,39 @@ RUN if [ -n "$USE_ARMV6_TOOLCHAIN" ]; then \
 # Add ARMv6 toolchain to PATH if installed
 ENV PATH="${USE_ARMV6_TOOLCHAIN:+/opt/x-tools/armv6-rpi-linux-gnueabihf/bin:}${PATH}"
 
-# Install standard cross-compiler packages if specified
+# Cross-compile alsa-lib from source for ARMv6 toolchain
+# This ensures libasound.so is built against the tttapa toolchain's glibc
+# instead of Debian's glibc 2.36, which the tttapa sysroot doesn't provide.
+RUN if [ -n "$USE_ARMV6_TOOLCHAIN" ]; then \
+        apt-get update \
+        && apt-get install -y --no-install-recommends \
+            make \
+            autoconf \
+            automake \
+            libtool \
+        && rm -rf /var/lib/apt/lists/* \
+        && cd /tmp \
+        && wget -q https://www.alsa-project.org/files/pub/lib/alsa-lib-1.2.12.tar.bz2 \
+        && tar -xjf alsa-lib-1.2.12.tar.bz2 \
+        && cd alsa-lib-1.2.12 \
+        && ./configure \
+            --host=armv6-rpi-linux-gnueabihf \
+            --prefix=/opt/x-tools/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot/usr \
+            --disable-python \
+        && make -j$(nproc) \
+        && make install \
+        && cd /tmp \
+        && rm -rf alsa-lib-1.2.12 alsa-lib-1.2.12.tar.bz2; \
+    fi
+
+# Install standard cross-compiler packages and cross-arch libraries if specified.
+# For cross-compilation, CROSS_PKG should include arch-qualified ALSA dev packages
+# (e.g., libasound2-dev:armhf for ARM targets).
+# NOTE: For ARMv6, we DO NOT install libasound2-dev:armhf because we build it from source.
 RUN if [ -n "$CROSS_PKG" ]; then \
+        dpkg --add-architecture armhf 2>/dev/null; \
+        dpkg --add-architecture arm64 2>/dev/null; \
+        dpkg --add-architecture i386 2>/dev/null; \
         apt-get update \
         && apt-get install -y --no-install-recommends $CROSS_PKG \
         && rm -rf /var/lib/apt/lists/*; \
@@ -96,6 +137,13 @@ RUN mkdir -p .cargo && { \
             echo ']'; \
         fi; \
     } > .cargo/config.toml
+
+# Enable cross-compilation for pkg-config (ALSA, etc.)
+# CROSS_PKG_CONFIG_LIBDIR overrides pkg-config's search path so it finds
+# target-arch .pc files instead of the host x86_64 ones. Without this, the
+# linker gets -L /usr/lib/x86_64-linux-gnu and fails on cross-arch libc.
+ENV PKG_CONFIG_ALLOW_CROSS=1
+ENV PKG_CONFIG_LIBDIR=${CROSS_PKG_CONFIG_LIBDIR:-}
 
 # -- Dependency caching layer --
 COPY Cargo.toml Cargo.lock ./
@@ -157,7 +205,9 @@ LABEL org.opencontainers.image.title="wyoming-satellite" \
       io.wyoming.target="${RUST_TARGET}"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /output/wyoming-satellite /usr/local/bin/wyoming-satellite

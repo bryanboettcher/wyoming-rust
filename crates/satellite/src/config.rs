@@ -60,6 +60,10 @@ pub struct AudioConfig {
     #[serde(default)]
     pub wav_input: Option<String>,
 
+    /// ALSA device name for playback (e.g. "plughw:0,0"). Optional.
+    #[serde(default)]
+    pub playback_device: Option<String>,
+
     /// WAV file to write TTS output to (testing mode).
     #[serde(default)]
     pub wav_output: Option<String>,
@@ -714,6 +718,7 @@ wav_input = "test.wav"
     fn frame_size_calculation() {
         let config = AudioConfig {
             device: None,
+            playback_device: None,
             wav_input: Some("test.wav".into()),
             wav_output: None,
             rate: 16000,

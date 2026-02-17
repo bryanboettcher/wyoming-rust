@@ -72,6 +72,7 @@ jobs:
             build-args: |
               RUST_TARGET=arm-unknown-linux-gnueabihf
               USE_ARMV6_TOOLCHAIN=1
+              DEBIAN_PLATFORM=linux/arm/v7
               LINKER=armv6-rpi-linux-gnueabihf-gcc
               STRIP_CMD=armv6-rpi-linux-gnueabihf-strip
               RUSTFLAGS_EXTRA=-C target-cpu=arm1176jzf-s

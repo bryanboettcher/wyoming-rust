@@ -231,7 +231,10 @@ RUN mkdir -p /output && \
 # $TARGETPLATFORM is the default for FROM, so --platform is omitted to avoid
 # the BuildKit RedundantTargetPlatform warning. The correct platform variant
 # is selected automatically when `docker buildx build --platform <target>` is used.
-FROM debian:bookworm-slim
+# For ARMv6 builds (platform linux/arm/v6), we need to explicitly use linux/arm/v7
+# for the base image since Debian does not publish arm/v6. The armhf userland works fine.
+ARG DEBIAN_PLATFORM=${TARGETPLATFORM}
+FROM --platform=${DEBIAN_PLATFORM} debian:bookworm-slim
 
 ARG RUST_TARGET=x86_64-unknown-linux-gnu
 

@@ -9,7 +9,7 @@ use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 use crate::config::Config;
 use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError};
 use crate::feedback::{self, Feedback, FanoutFeedback};
-use crate::hardware::{AudioError, AudioSink, AudioSource, GpioInput};
+use crate::hardware::{AudioError, AudioSink, AudioSource, Vad};
 use crate::state::{Action, SatelliteInput, SatelliteState};
 
 /// How the satellite establishes its connection to HA.
@@ -28,14 +28,17 @@ pub struct SatelliteService {
     sat_info: SatelliteInfo,
     mic: Box<dyn AudioSource>,
     spk: Box<dyn AudioSink>,
-    gpio: Box<dyn GpioInput>,
+    vad: Box<dyn Vad>,
     feedback: Box<dyn Feedback>,
     audio_format: AudioFormat,
     /// Format from the most recent server `audio-start` event (TTS playback).
     /// Defaults to the capture format; updated when the server sends audio-start.
     playback_format: AudioFormat,
     silence_timeout: Duration,
-    last_gpio_high: Instant,
+    /// Whether the mic is currently running (for continuous-capture VAD modes).
+    mic_running: bool,
+    /// Timestamp of last voice activity detection.
+    last_vad_active: Instant,
     config: Config,
 }
 
@@ -53,7 +56,7 @@ impl SatelliteService {
 
         let mic = create_audio_source(config)?;
         let spk = create_audio_sink(config)?;
-        let gpio = create_gpio(config);
+        let vad = create_vad(config)?;
         let feedback = create_feedback(config);
 
         let mode = if config.server.mode == "listen" {
@@ -66,7 +69,7 @@ impl SatelliteService {
         };
 
         let audio_format = config.audio.audio_format();
-        let silence_timeout = Duration::from_millis(config.gpio.silence_timeout_ms);
+        let silence_timeout = Duration::from_millis(config.vad.silence_timeout_ms());
 
         Ok(Self {
             mode,
@@ -74,12 +77,13 @@ impl SatelliteService {
             sat_info,
             mic,
             spk,
-            gpio,
+            vad,
             feedback,
             audio_format,
             playback_format: audio_format,
             silence_timeout,
-            last_gpio_high: Instant::now(),
+            mic_running: false,
+            last_vad_active: Instant::now(),
             config: config.clone(),
         })
     }
@@ -141,28 +145,76 @@ impl SatelliteService {
         let conn = self.conn.as_mut().expect("no connection established");
 
         match state {
-            // IDLE: poll GPIO and server socket
+            // IDLE: either poll GPIO or read mic frames (depending on VAD mode)
             SatelliteState::Idle => {
-                // Check for GPIO trigger
-                if self.gpio.wait_for_high(Duration::from_millis(100)) {
-                    self.last_gpio_high = Instant::now();
-                    return Ok(Some(SatelliteInput::GpioHigh));
-                }
+                if self.vad.needs_continuous_capture() {
+                    // Energy/AlwaysOn: mic must be running to detect voice
+                    if !self.mic_running {
+                        if let Err(e) = self.mic.start() {
+                            log::error!("Failed to start mic for continuous VAD: {}", e);
+                            return Err(e.into());
+                        }
+                        self.mic_running = true;
+                        log::debug!("Mic started for continuous-capture VAD");
+                    }
 
-                // Check for server messages (non-blocking)
-                match conn.try_read_event() {
-                    Ok(Some(event)) => {
-                        if let Some(input) = self.handle_server_event(&event) {
-                            return Ok(Some(input));
+                    // Read a frame and poll VAD
+                    match self.mic.read_frame() {
+                        Ok(frame) => {
+                            if self.vad.poll(Some(&frame)) {
+                                self.last_vad_active = Instant::now();
+                                return Ok(Some(SatelliteInput::VoiceDetected));
+                            }
+                        }
+                        Err(AudioError::EndOfStream) => {
+                            // WAV file exhausted in Idle — trigger silence timeout for graceful exit
+                            log::info!("Audio source exhausted in Idle, triggering silence timeout");
+                            return Ok(Some(SatelliteInput::SilenceTimeout));
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+
+                    // Check for server messages (non-blocking)
+                    match conn.try_read_event() {
+                        Ok(Some(event)) => {
+                            if let Some(input) = self.handle_server_event(&event) {
+                                return Ok(Some(input));
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
+                            return Ok(Some(SatelliteInput::Disconnected));
+                        }
+                        Err(e) => {
+                            log::warn!("Error reading from server in Idle: {}", e);
+                            return Ok(Some(SatelliteInput::Disconnected));
                         }
                     }
-                    Ok(None) => {}
-                    Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
-                        return Ok(Some(SatelliteInput::Disconnected));
+                } else {
+                    // GPIO mode: poll without audio
+                    if self.vad.poll(None) {
+                        self.last_vad_active = Instant::now();
+                        return Ok(Some(SatelliteInput::VoiceDetected));
                     }
-                    Err(e) => {
-                        log::warn!("Error reading from server in Idle: {}", e);
-                        return Ok(Some(SatelliteInput::Disconnected));
+
+                    // Sleep briefly to avoid busy-waiting on GPIO poll
+                    std::thread::sleep(Duration::from_millis(100));
+
+                    // Check for server messages (non-blocking)
+                    match conn.try_read_event() {
+                        Ok(Some(event)) => {
+                            if let Some(input) = self.handle_server_event(&event) {
+                                return Ok(Some(input));
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
+                            return Ok(Some(SatelliteInput::Disconnected));
+                        }
+                        Err(e) => {
+                            log::warn!("Error reading from server in Idle: {}", e);
+                            return Ok(Some(SatelliteInput::Disconnected));
+                        }
                     }
                 }
 
@@ -203,7 +255,20 @@ impl SatelliteService {
                     Err(e) => return Err(e.into()),
                 };
 
-                // 2. Send audio chunk to server
+                // 2. Check VAD for silence timeout (before sending, to avoid move)
+                let vad_active = if let Some(ref f) = frame {
+                    self.vad.poll(Some(f))
+                } else {
+                    false
+                };
+
+                if vad_active {
+                    self.last_vad_active = Instant::now();
+                } else if self.last_vad_active.elapsed() > self.silence_timeout {
+                    return Ok(Some(SatelliteInput::SilenceTimeout));
+                }
+
+                // 3. Send audio chunk to server
                 if let Some(frame) = frame {
                     let chunk = AudioChunk {
                         format: self.audio_format,
@@ -211,13 +276,6 @@ impl SatelliteService {
                         timestamp: None,
                     };
                     conn.send(chunk)?;
-                }
-
-                // 3. Check GPIO for silence timeout
-                if self.gpio.is_high() {
-                    self.last_gpio_high = Instant::now();
-                } else if self.last_gpio_high.elapsed() > self.silence_timeout {
-                    return Ok(Some(SatelliteInput::SilenceTimeout));
                 }
 
                 // 4. Check for server message (non-blocking)
@@ -281,11 +339,18 @@ impl SatelliteService {
         match action {
             Action::StartCapture => {
                 log::debug!("Action: StartCapture");
-                self.mic.start()?;
+                if !self.mic_running {
+                    self.mic.start()?;
+                    self.mic_running = true;
+                } else {
+                    log::debug!("Mic already running, skipping start");
+                }
             }
             Action::StopCapture => {
                 log::debug!("Action: StopCapture");
                 self.mic.stop()?;
+                self.mic_running = false;
+                self.vad.reset();
             }
             Action::SendAudioStart => {
                 log::debug!("Action: SendAudioStart");
@@ -383,12 +448,28 @@ fn create_audio_sink(config: &Config) -> Result<Box<dyn AudioSink>, Box<dyn std:
     }
 }
 
-fn create_gpio(config: &Config) -> Box<dyn GpioInput> {
-    if config.gpio.auto_trigger || config.gpio.vad_pin.is_none() {
-        Box::new(crate::hardware::AutoGpio::new())
-    } else {
-        log::warn!("Real GPIO not implemented, falling back to auto-trigger");
-        Box::new(crate::hardware::AutoGpio::new())
+fn create_vad(config: &Config) -> Result<Box<dyn Vad>, Box<dyn std::error::Error>> {
+    use crate::config::VadConfig;
+
+    match &config.vad {
+        VadConfig::AlwaysOn { .. } => {
+            log::info!("VAD mode: AlwaysOn");
+            Ok(Box::new(crate::hardware::AlwaysOnVad::new()))
+        }
+        VadConfig::Gpio { pin, .. } => {
+            log::info!("VAD mode: GPIO (pin {})", pin);
+            match crate::hardware::GpioVad::new(*pin) {
+                Ok(vad) => Ok(Box::new(vad)),
+                Err(e) => {
+                    log::warn!("GPIO VAD unavailable ({}), falling back to AlwaysOn", e);
+                    Ok(Box::new(crate::hardware::AlwaysOnVad::new()))
+                }
+            }
+        }
+        VadConfig::Energy { threshold, .. } => {
+            log::info!("VAD mode: Energy (threshold {})", threshold);
+            Ok(Box::new(crate::hardware::EnergyVad::new(*threshold)))
+        }
     }
 }
 

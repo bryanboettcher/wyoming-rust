@@ -2,18 +2,52 @@
 #
 # Used by `cross` via Cross.toml. Extends the default cross image with
 # libasound2-dev for the ARM hard-float sysroot.
+#
+# NOTE: We cannot use `apt-get install libasound2-dev:armhf` because `cross`
+# blocks all armhf packages for arm-unknown-linux-gnueabihf (ARMv6 != ARMv7).
+# Instead we download the .deb files from Raspberry Pi OS (which targets ARMv6
+# with armhf) and extract them manually into the cross sysroot.
 ARG CROSS_BASE_IMAGE
 FROM ${CROSS_BASE_IMAGE}
 
-# Install ALSA dev headers for the target architecture.
-# The cross base image already has dpkg configured for armhf.
-RUN dpkg --add-architecture armhf && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-        libasound2-dev:armhf \
-        pkg-config && \
+# Install wget for fetching debs
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config wget && \
     rm -rf /var/lib/apt/lists/*
 
+# The cross-rs image uses crosstool-ng with sysroot at:
+#   /x-tools/arm-unknown-linux-gnueabihf/arm-unknown-linux-gnueabihf/sysroot
+# Download ALSA dev headers from Raspberry Pi OS (Bullseye, armhf = ARMv6+, glibc 2.31)
+# and install into the cross sysroot.
+RUN set -eux && \
+    SYSROOT=/x-tools/arm-unknown-linux-gnueabihf/arm-unknown-linux-gnueabihf/sysroot && \
+    MIRROR=http://archive.raspberrypi.com/debian && \
+    POOL=pool/main/a/alsa-lib && \
+    ALSA_VER=1.2.4-1.1+rpt2 && \
+    mkdir -p /tmp/debs && cd /tmp/debs && \
+    wget -q "${MIRROR}/${POOL}/libasound2_${ALSA_VER}_armhf.deb" && \
+    wget -q "${MIRROR}/${POOL}/libasound2-dev_${ALSA_VER}_armhf.deb" && \
+    for deb in *.deb; do dpkg-deb -x "$deb" /tmp/alsa-extract; done && \
+    cp -a /tmp/alsa-extract/usr/include/* ${SYSROOT}/usr/include/ && \
+    cp -a /tmp/alsa-extract/usr/lib/arm-linux-gnueabihf/* ${SYSROOT}/usr/lib/ && \
+    rm -rf /tmp/debs /tmp/alsa-extract
+
+# Write the pkg-config file for ALSA pointing to the sysroot paths
+RUN mkdir -p /x-tools/arm-unknown-linux-gnueabihf/arm-unknown-linux-gnueabihf/sysroot/usr/lib/pkgconfig && \
+    printf '%s\n' \
+        'prefix=/x-tools/arm-unknown-linux-gnueabihf/arm-unknown-linux-gnueabihf/sysroot/usr' \
+        'exec_prefix=${prefix}' \
+        'libdir=${prefix}/lib' \
+        'includedir=${prefix}/include' \
+        '' \
+        'Name: alsa' \
+        'Description: Advanced Linux Sound Architecture (ALSA) - Library' \
+        'Version: 1.2.4' \
+        'Libs: -L${libdir} -lasound' \
+        'Libs.private: -lm -ldl -lpthread -lrt' \
+        'Cflags: -I${includedir}' \
+        > /x-tools/arm-unknown-linux-gnueabihf/arm-unknown-linux-gnueabihf/sysroot/usr/lib/pkgconfig/alsa.pc
+
 # Tell pkg-config where to find the cross-compiled ALSA .pc files
-ENV PKG_CONFIG_PATH_arm_unknown_linux_gnueabihf=/usr/lib/arm-linux-gnueabihf/pkgconfig
+ENV PKG_CONFIG_PATH_arm_unknown_linux_gnueabihf=/x-tools/arm-unknown-linux-gnueabihf/arm-unknown-linux-gnueabihf/sysroot/usr/lib/pkgconfig
 ENV PKG_CONFIG_ALLOW_CROSS=1

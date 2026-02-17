@@ -56,17 +56,23 @@ pub trait AudioSink {
 }
 
 // ============================================================================
-// GPIO Input Trait
+// VAD (Voice Activity Detection) Trait
 // ============================================================================
 
-/// Abstraction over a GPIO pin used for voice activity detection.
-pub trait GpioInput {
-    /// Check if the trigger pin is currently high.
-    fn is_high(&self) -> bool;
+/// Abstraction over voice activity detection. Supports multiple modes:
+/// - GPIO: Hardware trigger on a pin
+/// - Energy: Software RMS threshold on audio frames
+/// - AlwaysOn: Auto-trigger for testing
+pub trait Vad {
+    /// Check for voice activity. `audio_frame` is Some when mic is running.
+    /// For GPIO mode, audio_frame is ignored. For Energy mode, it's required.
+    fn poll(&mut self, audio_frame: Option<&[u8]>) -> bool;
 
-    /// Block until the pin goes high or timeout expires.
-    /// Returns true if the pin went high, false on timeout.
-    fn wait_for_high(&self, timeout: Duration) -> bool;
+    /// Whether mic must run during Idle (Energy/AlwaysOn: true, GPIO: false).
+    fn needs_continuous_capture(&self) -> bool;
+
+    /// Reset internal state on return to Idle.
+    fn reset(&mut self);
 }
 
 // ============================================================================
@@ -251,27 +257,146 @@ impl AudioSink for WavFileSink {
     }
 }
 
-/// Auto-triggering GPIO for testing. Always fires GpioHigh immediately
-/// when polled, and always reports low for `is_high()`. The silence
-/// timeout in the main loop (tracked via `last_gpio_high` timestamp)
-/// handles the streaming duration.
-pub struct AutoGpio;
+// ============================================================================
+// VAD Implementations
+// ============================================================================
 
-impl AutoGpio {
+/// Always-on VAD for testing. Immediately triggers and requires continuous capture.
+pub struct AlwaysOnVad;
+
+impl AlwaysOnVad {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl GpioInput for AutoGpio {
-    fn is_high(&self) -> bool {
-        // Always low — the main loop tracks the timeout from the initial trigger
+impl Vad for AlwaysOnVad {
+    fn poll(&mut self, _audio_frame: Option<&[u8]>) -> bool {
+        // Always return true — voice is "always detected"
+        true
+    }
+
+    fn needs_continuous_capture(&self) -> bool {
+        true
+    }
+
+    fn reset(&mut self) {
+        // No state to reset
+    }
+}
+
+/// GPIO-based VAD. Reads a hardware pin for voice activity trigger.
+/// Requires rppal on Raspberry Pi hardware.
+pub struct GpioVad {
+    #[cfg(target_os = "linux")]
+    pin: rppal::gpio::InputPin,
+    #[cfg(not(target_os = "linux"))]
+    _phantom: std::marker::PhantomData<()>,
+}
+
+impl GpioVad {
+    #[cfg(target_os = "linux")]
+    pub fn new(pin_num: u32) -> Result<Self, AudioError> {
+        use rppal::gpio::Gpio;
+
+        let gpio = Gpio::new()
+            .map_err(|e| AudioError::DeviceUnavailable(format!("GPIO init failed: {}", e)))?;
+
+        let pin = gpio
+            .get(pin_num as u8)
+            .map_err(|e| AudioError::DeviceUnavailable(format!("GPIO pin {} unavailable: {}", pin_num, e)))?
+            .into_input_pulldown();
+
+        log::info!("GPIO VAD initialized on pin {}", pin_num);
+        Ok(Self { pin })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn new(_pin_num: u32) -> Result<Self, AudioError> {
+        Err(AudioError::DeviceUnavailable(
+            "GPIO VAD requires Linux (rppal)".into(),
+        ))
+    }
+}
+
+impl Vad for GpioVad {
+    fn poll(&mut self, _audio_frame: Option<&[u8]>) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            use rppal::gpio::Level;
+            self.pin.read() == Level::High
+        }
+        #[cfg(not(target_os = "linux"))]
         false
     }
 
-    fn wait_for_high(&self, _timeout: Duration) -> bool {
-        // Immediately trigger in test mode
+    fn needs_continuous_capture(&self) -> bool {
+        false
+    }
+
+    fn reset(&mut self) {
+        // No state to reset
+    }
+}
+
+/// Energy-based VAD. Computes RMS on PCM16LE frames and compares to threshold.
+pub struct EnergyVad {
+    threshold: u16,
+}
+
+impl EnergyVad {
+    pub fn new(threshold: u16) -> Self {
+        log::info!("Energy VAD initialized with threshold {}", threshold);
+        Self { threshold }
+    }
+
+    /// Compute RMS (root mean square) of PCM16LE audio frame.
+    /// Returns u16 in range 0-32768.
+    fn compute_rms(frame: &[u8]) -> u16 {
+        if frame.is_empty() {
+            return 0;
+        }
+
+        // PCM16LE: every 2 bytes is one i16 sample
+        let samples: Vec<i16> = frame
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+
+        if samples.is_empty() {
+            return 0;
+        }
+
+        // Compute sum of squares
+        let sum_of_squares: i64 = samples.iter().map(|&s| (s as i64) * (s as i64)).sum();
+        let mean_square = sum_of_squares / samples.len() as i64;
+        let rms = (mean_square as f64).sqrt();
+
+        // Clamp to u16 range
+        rms.min(32768.0) as u16
+    }
+}
+
+impl Vad for EnergyVad {
+    fn poll(&mut self, audio_frame: Option<&[u8]>) -> bool {
+        match audio_frame {
+            Some(frame) => {
+                let rms = Self::compute_rms(frame);
+                rms >= self.threshold
+            }
+            None => {
+                log::warn!("EnergyVad.poll() called without audio frame");
+                false
+            }
+        }
+    }
+
+    fn needs_continuous_capture(&self) -> bool {
         true
+    }
+
+    fn reset(&mut self) {
+        // No state to reset (stateless threshold check)
     }
 }
 
@@ -289,14 +414,66 @@ mod tests {
     }
 
     #[test]
-    fn auto_gpio_fires_immediately() {
-        let gpio = AutoGpio::new();
-        assert!(gpio.wait_for_high(Duration::from_millis(100)));
+    fn always_on_vad_always_triggers() {
+        let mut vad = AlwaysOnVad::new();
+        assert!(vad.poll(None));
+        assert!(vad.poll(Some(&[0u8; 640])));
+        assert!(vad.needs_continuous_capture());
     }
 
     #[test]
-    fn auto_gpio_is_always_low() {
-        let gpio = AutoGpio::new();
-        assert!(!gpio.is_high());
+    fn energy_vad_silence_no_trigger() {
+        let mut vad = EnergyVad::new(1000);
+        let silence = vec![0u8; 640]; // All zeros = RMS 0
+        assert!(!vad.poll(Some(&silence)));
+        assert!(vad.needs_continuous_capture());
+    }
+
+    #[test]
+    fn energy_vad_loud_frame_triggers() {
+        let mut vad = EnergyVad::new(1000);
+        // Create a loud frame: 320 samples at max amplitude
+        let mut loud_frame = Vec::with_capacity(640);
+        for _ in 0..320 {
+            loud_frame.extend_from_slice(&10000i16.to_le_bytes());
+        }
+        assert!(vad.poll(Some(&loud_frame)));
+    }
+
+    #[test]
+    fn energy_vad_threshold_boundary() {
+        let mut vad = EnergyVad::new(5000);
+        // Create frame right at threshold
+        let mut frame = Vec::with_capacity(640);
+        for _ in 0..320 {
+            frame.extend_from_slice(&5000i16.to_le_bytes());
+        }
+        assert!(vad.poll(Some(&frame))); // RMS = 5000, threshold = 5000, should trigger
+    }
+
+    #[test]
+    fn energy_vad_empty_frame_safe() {
+        let mut vad = EnergyVad::new(1000);
+        assert!(!vad.poll(Some(&[])));
+    }
+
+    #[test]
+    fn energy_vad_no_frame_returns_false() {
+        let mut vad = EnergyVad::new(1000);
+        assert!(!vad.poll(None));
+    }
+
+    #[test]
+    fn energy_vad_compute_rms() {
+        // Silence
+        let silence = vec![0u8; 640];
+        assert_eq!(EnergyVad::compute_rms(&silence), 0);
+
+        // Single sample at 1000
+        let frame = 1000i16.to_le_bytes();
+        assert_eq!(EnergyVad::compute_rms(&frame), 1000);
+
+        // Empty frame
+        assert_eq!(EnergyVad::compute_rms(&[]), 0);
     }
 }

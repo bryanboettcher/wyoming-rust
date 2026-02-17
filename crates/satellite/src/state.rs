@@ -15,7 +15,7 @@ pub enum SatelliteState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SatelliteInput {
     // Hardware
-    GpioHigh,
+    VoiceDetected,
     SilenceTimeout,
     #[allow(dead_code)] // Used when real ALSA playback reports completion
     PlaybackComplete,
@@ -86,7 +86,7 @@ pub fn transition(state: &SatelliteState, input: &SatelliteInput) -> (SatelliteS
 
     match (state, input) {
         // ── IDLE ──────────────────────────────────────────
-        (Idle, GpioHigh) => (
+        (Idle, VoiceDetected) => (
             Streaming,
             vec![Action::SetFeedback(FeedbackState::Listening), Action::StartCapture, Action::SendAudioStart, Action::SendStreamingStarted],
         ),

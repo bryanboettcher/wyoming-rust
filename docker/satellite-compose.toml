@@ -3,8 +3,8 @@ name = "test-satellite"
 area = "Test Room"
 
 [server]
-mode = "connect"
-host = "mock-server"
+mode = "listen"
+host = "0.0.0.0"
 port = 10700
 
 [audio]
@@ -14,8 +14,8 @@ width = 2
 channels = 1
 chunk_ms = 20
 
-[gpio]
-auto_trigger = true
+[vad]
+mode = "always_on"
 silence_timeout_ms = 3000
 
 # No [[feedback]] configured — defaults to logging-only provider.

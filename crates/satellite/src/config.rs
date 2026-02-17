@@ -20,7 +20,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub audio: AudioConfig,
     #[serde(default)]
-    pub gpio: GpioConfig,
+    pub vad: VadConfig,
     #[serde(default)]
     pub feedback: Vec<FeedbackProviderConfig>,
 }
@@ -111,27 +111,51 @@ impl AudioConfig {
     }
 }
 
+/// Voice Activity Detection configuration. Discriminated by the `mode` field.
+///
+/// Three modes are supported:
+/// - `always_on`: Auto-trigger mode for testing (default)
+/// - `gpio`: Hardware button/trigger on a GPIO pin
+/// - `energy`: Software RMS-based VAD on audio frames
 #[derive(Debug, Clone, Deserialize)]
-pub struct GpioConfig {
-    /// GPIO pin number for VAD Schmitt trigger input. None = auto-trigger mode.
-    #[serde(default)]
-    pub vad_pin: Option<u32>,
+#[serde(tag = "mode")]
+pub enum VadConfig {
+    #[serde(rename = "always_on")]
+    AlwaysOn {
+        #[serde(default = "default_silence_timeout_ms")]
+        silence_timeout_ms: u64,
+    },
 
-    /// How long after GPIO goes low before we stop streaming (ms).
-    #[serde(default = "default_silence_timeout_ms")]
-    pub silence_timeout_ms: u64,
+    #[serde(rename = "gpio")]
+    Gpio {
+        pin: u32,
+        #[serde(default = "default_silence_timeout_ms")]
+        silence_timeout_ms: u64,
+    },
 
-    /// If true, automatically trigger (no GPIO hardware needed).
-    #[serde(default)]
-    pub auto_trigger: bool,
+    #[serde(rename = "energy")]
+    Energy {
+        threshold: u16,
+        #[serde(default = "default_silence_timeout_ms")]
+        silence_timeout_ms: u64,
+    },
 }
 
-impl Default for GpioConfig {
+impl Default for VadConfig {
     fn default() -> Self {
-        Self {
-            vad_pin: None,
+        VadConfig::AlwaysOn {
             silence_timeout_ms: default_silence_timeout_ms(),
-            auto_trigger: true,
+        }
+    }
+}
+
+impl VadConfig {
+    /// Get the silence timeout in milliseconds for this VAD mode.
+    pub fn silence_timeout_ms(&self) -> u64 {
+        match self {
+            VadConfig::AlwaysOn { silence_timeout_ms } => *silence_timeout_ms,
+            VadConfig::Gpio { silence_timeout_ms, .. } => *silence_timeout_ms,
+            VadConfig::Energy { silence_timeout_ms, .. } => *silence_timeout_ms,
         }
     }
 }
@@ -365,7 +389,7 @@ chunk_ms = 20
     }
 
     #[test]
-    fn parse_hardware_config() {
+    fn parse_hardware_config_with_gpio_vad() {
         let toml = r#"
 [satellite]
 name = "living-room"
@@ -377,8 +401,9 @@ host = "homeassistant.local"
 [audio]
 device = "hw:0,0"
 
-[gpio]
-vad_pin = 17
+[vad]
+mode = "gpio"
+pin = 17
 silence_timeout_ms = 2500
 
 [[feedback]]
@@ -387,7 +412,13 @@ pin = 10
 led_count = 3
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.gpio.vad_pin, Some(17));
+        match &config.vad {
+            VadConfig::Gpio { pin, silence_timeout_ms } => {
+                assert_eq!(*pin, 17);
+                assert_eq!(*silence_timeout_ms, 2500);
+            }
+            other => panic!("expected Gpio VAD, got {:?}", other),
+        }
         assert_eq!(config.feedback.len(), 1);
         match &config.feedback[0] {
             FeedbackProviderConfig::Neopixel { pin, led_count, .. } => {
@@ -400,7 +431,7 @@ led_count = 3
     }
 
     #[test]
-    fn defaults_for_gpio_and_feedback() {
+    fn defaults_for_vad_and_feedback() {
         let toml = r#"
 [satellite]
 name = "test"
@@ -412,7 +443,8 @@ host = "localhost"
 wav_input = "test.wav"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert!(config.gpio.auto_trigger);
+        assert!(matches!(config.vad, VadConfig::AlwaysOn { .. }));
+        assert_eq!(config.vad.silence_timeout_ms(), 2500);
         assert!(config.feedback.is_empty());
     }
 
@@ -779,5 +811,126 @@ wav_input = "test.wav"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn vad_mode_always_on() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "always_on"
+silence_timeout_ms = 3000
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.vad {
+            VadConfig::AlwaysOn { silence_timeout_ms } => {
+                assert_eq!(*silence_timeout_ms, 3000);
+            }
+            other => panic!("expected AlwaysOn VAD, got {:?}", other),
+        }
+        assert_eq!(config.vad.silence_timeout_ms(), 3000);
+    }
+
+    #[test]
+    fn vad_mode_gpio() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "gpio"
+pin = 23
+silence_timeout_ms = 1500
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.vad {
+            VadConfig::Gpio { pin, silence_timeout_ms } => {
+                assert_eq!(*pin, 23);
+                assert_eq!(*silence_timeout_ms, 1500);
+            }
+            other => panic!("expected Gpio VAD, got {:?}", other),
+        }
+        assert_eq!(config.vad.silence_timeout_ms(), 1500);
+    }
+
+    #[test]
+    fn vad_mode_energy() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "energy"
+threshold = 1500
+silence_timeout_ms = 2000
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.vad {
+            VadConfig::Energy { threshold, silence_timeout_ms } => {
+                assert_eq!(*threshold, 1500);
+                assert_eq!(*silence_timeout_ms, 2000);
+            }
+            other => panic!("expected Energy VAD, got {:?}", other),
+        }
+        assert_eq!(config.vad.silence_timeout_ms(), 2000);
+    }
+
+    #[test]
+    fn vad_mode_gpio_with_default_timeout() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "gpio"
+pin = 17
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.vad.silence_timeout_ms(), 2500); // default
+    }
+
+    #[test]
+    fn vad_mode_unknown_rejected() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "invalid_mode"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err());
     }
 }

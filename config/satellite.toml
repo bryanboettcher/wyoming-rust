@@ -11,9 +11,10 @@ name = "my-satellite"
 area = "Living Room"
 
 [server]
-# Wyoming server host — typically your Home Assistant instance or a
-# standalone wyoming-openwakeword / wyoming-piper container.
-host = "homeassistant.local"
+# In "listen" mode the satellite binds a TCP server and waits for
+# Home Assistant (or another Wyoming client) to connect to it.
+mode = "listen"
+host = "0.0.0.0"
 port = 10700
 
 [audio]
@@ -27,13 +28,21 @@ width = 2
 channels = 1
 chunk_ms = 20
 
-[gpio]
-# GPIO pin connected to a VAD Schmitt trigger circuit.
-# Set to trigger voice activity detection from hardware.
-# Comment out vad_pin and set auto_trigger = true to skip hardware VAD.
-vad_pin = 17
+[vad]
+# Voice Activity Detection mode.
+# Available modes:
+#   "always_on" — auto-trigger for testing (default if [vad] omitted)
+#   "gpio"      — hardware button or Schmitt trigger on a GPIO pin
+#   "energy"    — software RMS threshold on mic audio
+mode = "gpio"
+pin = 17
 silence_timeout_ms = 2500
-auto_trigger = false
+
+# Energy-based VAD example (USB mic, no GPIO):
+# [vad]
+# mode = "energy"
+# threshold = 1000
+# silence_timeout_ms = 2500
 
 # ============================================================================
 # Feedback providers

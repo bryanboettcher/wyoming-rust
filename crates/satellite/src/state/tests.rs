@@ -30,10 +30,10 @@ fn assert_no_op(state: SatelliteState, input: SatelliteInput) {
 // ============================================================================
 
 #[test]
-fn idle_gpio_high_starts_streaming() {
+fn idle_voice_detected_starts_streaming() {
     assert_transition(
         SatelliteState::Idle,
-        SatelliteInput::GpioHigh,
+        SatelliteInput::VoiceDetected,
         SatelliteState::Streaming,
         vec![
             Action::SetFeedback(FeedbackState::Listening),
@@ -158,8 +158,8 @@ fn streaming_disconnected_returns_to_idle() {
 }
 
 #[test]
-fn streaming_ignores_gpio_high() {
-    assert_no_op(SatelliteState::Streaming, SatelliteInput::GpioHigh);
+fn streaming_ignores_voice_detected() {
+    assert_no_op(SatelliteState::Streaming, SatelliteInput::VoiceDetected);
 }
 
 #[test]
@@ -234,8 +234,8 @@ fn triggered_disconnected_returns_to_idle() {
 }
 
 #[test]
-fn triggered_ignores_gpio_high() {
-    assert_no_op(SatelliteState::Triggered, SatelliteInput::GpioHigh);
+fn triggered_ignores_voice_detected() {
+    assert_no_op(SatelliteState::Triggered, SatelliteInput::VoiceDetected);
 }
 
 #[test]
@@ -321,8 +321,8 @@ fn processing_disconnected_returns_to_idle() {
 }
 
 #[test]
-fn processing_ignores_gpio_high() {
-    assert_no_op(SatelliteState::Processing, SatelliteInput::GpioHigh);
+fn processing_ignores_voice_detected() {
+    assert_no_op(SatelliteState::Processing, SatelliteInput::VoiceDetected);
 }
 
 #[test]
@@ -434,8 +434,8 @@ fn responding_disconnected_returns_to_idle() {
 }
 
 #[test]
-fn responding_ignores_gpio_high() {
-    assert_no_op(SatelliteState::Responding, SatelliteInput::GpioHigh);
+fn responding_ignores_voice_detected() {
+    assert_no_op(SatelliteState::Responding, SatelliteInput::VoiceDetected);
 }
 
 #[test]
@@ -503,7 +503,7 @@ fn full_happy_path_conversation() {
     let mut state = SatelliteState::Idle;
 
     // GPIO trigger -> Streaming
-    let (new_state, actions) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, actions) = transition(&state, &SatelliteInput::VoiceDetected);
     assert_eq!(new_state, SatelliteState::Streaming);
     assert_eq!(
         actions,
@@ -560,7 +560,7 @@ fn interrupted_conversation_pause_during_streaming() {
     let mut state = SatelliteState::Idle;
 
     // Start streaming
-    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
     state = new_state;
     assert_eq!(state, SatelliteState::Streaming);
 
@@ -582,7 +582,7 @@ fn timeout_during_streaming() {
     let mut state = SatelliteState::Idle;
 
     // Start streaming
-    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
     state = new_state;
     assert_eq!(state, SatelliteState::Streaming);
 
@@ -660,11 +660,11 @@ fn disconnection_from_all_states() {
 // ============================================================================
 
 #[test]
-fn double_gpio_high_from_idle() {
-    let (state, _) = transition(&SatelliteState::Idle, &SatelliteInput::GpioHigh);
+fn double_voice_detected_from_idle() {
+    let (state, _) = transition(&SatelliteState::Idle, &SatelliteInput::VoiceDetected);
     assert_eq!(state, SatelliteState::Streaming);
 
-    let (state2, actions2) = transition(&state, &SatelliteInput::GpioHigh);
+    let (state2, actions2) = transition(&state, &SatelliteInput::VoiceDetected);
     assert_eq!(state2, SatelliteState::Streaming);
     assert!(actions2.is_empty());
 }
@@ -672,7 +672,7 @@ fn double_gpio_high_from_idle() {
 #[test]
 fn two_complete_conversation_cycles() {
     let inputs_per_cycle = vec![
-        SatelliteInput::GpioHigh,
+        SatelliteInput::VoiceDetected,
         SatelliteInput::ServerDetection,
         SatelliteInput::ServerVoiceStarted,
         SatelliteInput::ServerTtsStart,
@@ -699,7 +699,7 @@ fn two_complete_conversation_cycles() {
 fn recovery_after_disconnection_during_streaming() {
     let mut state = SatelliteState::Idle;
 
-    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
     state = new_state;
 
     let (new_state, actions) = transition(&state, &SatelliteInput::Disconnected);
@@ -707,7 +707,7 @@ fn recovery_after_disconnection_during_streaming() {
     assert_eq!(state, SatelliteState::Idle);
     assert!(actions.contains(&Action::Reconnect));
 
-    let (new_state, actions) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, actions) = transition(&state, &SatelliteInput::VoiceDetected);
     assert_eq!(new_state, SatelliteState::Streaming);
     assert_eq!(
         actions,
@@ -719,7 +719,7 @@ fn recovery_after_disconnection_during_streaming() {
 fn recovery_after_disconnection_during_responding() {
     let mut state = SatelliteState::Idle;
     let walk_inputs = vec![
-        SatelliteInput::GpioHigh,
+        SatelliteInput::VoiceDetected,
         SatelliteInput::ServerDetection,
         SatelliteInput::ServerVoiceStarted,
         SatelliteInput::ServerTtsStart,
@@ -736,7 +736,7 @@ fn recovery_after_disconnection_during_responding() {
     assert!(actions.contains(&Action::StopCapture));
     assert!(actions.contains(&Action::StopPlayback));
 
-    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
     assert_eq!(new_state, SatelliteState::Streaming);
 }
 
@@ -768,7 +768,7 @@ fn action_ordering_processing_to_responding() {
 #[test]
 fn transition_is_pure_function() {
     let state = SatelliteState::Idle;
-    let input = SatelliteInput::GpioHigh;
+    let input = SatelliteInput::VoiceDetected;
 
     let (state1, actions1) = transition(&state, &input);
     let (state2, actions2) = transition(&state, &input);
@@ -783,7 +783,7 @@ fn server_side_wake_word_skips_triggered() {
     // directly without a detection event.
     let mut state = SatelliteState::Idle;
 
-    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
     state = new_state;
     assert_eq!(state, SatelliteState::Streaming);
 
@@ -808,7 +808,7 @@ fn pipeline_with_no_tts_response() {
     // voice-stopped without audio-start/audio-stop.
     let mut state = SatelliteState::Idle;
 
-    let (new_state, _) = transition(&state, &SatelliteInput::GpioHigh);
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
     state = new_state;
     let (new_state, _) = transition(&state, &SatelliteInput::ServerDetection);
     state = new_state;
@@ -829,7 +829,7 @@ fn voice_stopped_exits_responding() {
     // voice-stopped during Responding is a valid exit (redundant with TtsStop)
     let mut state = SatelliteState::Idle;
     let walk = vec![
-        SatelliteInput::GpioHigh,
+        SatelliteInput::VoiceDetected,
         SatelliteInput::ServerDetection,
         SatelliteInput::ServerVoiceStarted,
         SatelliteInput::ServerTtsStart,

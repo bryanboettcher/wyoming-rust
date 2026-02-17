@@ -10,7 +10,7 @@
 
 services:
   satellite:
-    image: ghcr.io/bryanboettcher/wyoming-rust:armv6
+    image: ghcr.io/bryanboettcher/wyoming-rust:latest
     container_name: wyoming-satellite
     ports:
       - "10700:10700"

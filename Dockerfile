@@ -159,8 +159,13 @@ RUN mkdir -p .cargo && { \
 # CROSS_PKG_CONFIG_LIBDIR overrides pkg-config's search path so it finds
 # target-arch .pc files instead of the host x86_64 ones. Without this, the
 # linker gets -L /usr/lib/x86_64-linux-gnu and fails on cross-arch libc.
+#
+# IMPORTANT: We must NOT set PKG_CONFIG_LIBDIR to an empty string — that tells
+# pkg-config to search NO directories, breaking even native builds where
+# libasound2-dev is installed normally. Instead of using ENV (which would bake
+# an empty string into the image), each cargo RUN step below conditionally
+# exports PKG_CONFIG_LIBDIR only when CROSS_PKG_CONFIG_LIBDIR is non-empty.
 ENV PKG_CONFIG_ALLOW_CROSS=1
-ENV PKG_CONFIG_LIBDIR=${CROSS_PKG_CONFIG_LIBDIR:-}
 
 # -- Dependency caching layer --
 COPY Cargo.toml Cargo.lock ./
@@ -168,7 +173,8 @@ COPY crates/wyoming/Cargo.toml crates/wyoming/Cargo.toml
 COPY crates/satellite/Cargo.toml crates/satellite/Cargo.toml
 
 # Create stub sources to let cargo resolve and build dependencies
-RUN mkdir -p crates/wyoming/src crates/satellite/src \
+RUN if [ -n "$CROSS_PKG_CONFIG_LIBDIR" ]; then export PKG_CONFIG_LIBDIR="$CROSS_PKG_CONFIG_LIBDIR"; fi \
+    && mkdir -p crates/wyoming/src crates/satellite/src \
     && echo "pub fn stub() {}" > crates/wyoming/src/lib.rs \
     && echo "fn main() {}" > crates/satellite/src/main.rs \
     && if [ "$RUST_TARGET" = "x86_64-unknown-linux-gnu" ]; then \
@@ -182,7 +188,8 @@ RUN mkdir -p crates/wyoming/src crates/satellite/src \
 COPY crates/ crates/
 
 # Remove stale fingerprints and build with real sources
-RUN if [ "$RUST_TARGET" = "x86_64-unknown-linux-gnu" ]; then \
+RUN if [ -n "$CROSS_PKG_CONFIG_LIBDIR" ]; then export PKG_CONFIG_LIBDIR="$CROSS_PKG_CONFIG_LIBDIR"; fi \
+    && if [ "$RUST_TARGET" = "x86_64-unknown-linux-gnu" ]; then \
         rm -f target/release/wyoming-satellite target/release/libwyoming.rlib \
         && rm -rf target/release/.fingerprint/wyoming-* \
         && cargo test --workspace \
@@ -221,7 +228,10 @@ RUN mkdir -p /output && \
 # Debian does support. Docker clients on arm/v6 devices automatically fall
 # back to arm/v5 images. The ARMv6 binary runs fine on arm/v5 userland
 # since the kernel is ARMv6-capable and glibc is forward-compatible.
-FROM --platform=$TARGETPLATFORM debian:bookworm-slim
+# $TARGETPLATFORM is the default for FROM, so --platform is omitted to avoid
+# the BuildKit RedundantTargetPlatform warning. The correct platform variant
+# is selected automatically when `docker buildx build --platform <target>` is used.
+FROM debian:bookworm-slim
 
 ARG RUST_TARGET=x86_64-unknown-linux-gnu
 

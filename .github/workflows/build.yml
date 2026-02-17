@@ -74,28 +74,32 @@ jobs:
               LINKER=armv6-rpi-linux-gnueabihf-gcc
               STRIP_CMD=armv6-rpi-linux-gnueabihf-strip
               RUSTFLAGS_EXTRA=-C target-cpu=arm1176jzf-s
+              CROSS_PKG_CONFIG_LIBDIR=/opt/x-tools/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot/usr/lib/pkgconfig
           - target: armv7-unknown-linux-gnueabihf
             tag: armv7
             platform: linux/arm/v7
             build-args: |
               RUST_TARGET=armv7-unknown-linux-gnueabihf
-              CROSS_PKG=gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+              CROSS_PKG=gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libasound2-dev:armhf
               LINKER=arm-linux-gnueabihf-gcc
               STRIP_CMD=arm-linux-gnueabihf-strip
+              CROSS_PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig
           - target: aarch64-unknown-linux-gnu
             tag: arm64
             platform: linux/arm64
             build-args: |
               RUST_TARGET=aarch64-unknown-linux-gnu
-              CROSS_PKG=gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+              CROSS_PKG=gcc-aarch64-linux-gnu libc6-dev-arm64-cross libasound2-dev:arm64
               LINKER=aarch64-linux-gnu-gcc
               STRIP_CMD=aarch64-linux-gnu-strip
+              CROSS_PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig
           - target: i686-unknown-linux-gnu
             tag: i686
             platform: linux/386
             build-args: |
               RUST_TARGET=i686-unknown-linux-gnu
-              CROSS_PKG=gcc-multilib libc6-dev-i386
+              CROSS_PKG=gcc-multilib libc6-dev-i386 libasound2-dev:i386
+              CROSS_PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig
     steps:
       - uses: actions/checkout@v4
 

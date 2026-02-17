@@ -1,0 +1,34 @@
+# Production deployment for Raspberry Pi Zero W running wyoming-rust satellite.
+#
+# Usage:
+#   1. Copy this directory to the Pi (or clone the repo)
+#   2. Edit satellite.toml to match your hardware (ALSA device, area name, etc.)
+#   3. docker compose up -d
+#
+# The avahi sidecar advertises the satellite via mDNS so Home Assistant
+# can auto-discover it on the local network.
+
+services:
+  satellite:
+    image: ghcr.io/bryanboettcher/wyoming-rust:armv6
+    container_name: wyoming-satellite
+    ports:
+      - "10700:10700"
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ./satellite.toml:/data/satellite.toml:ro
+    devices:
+      - /dev/snd:/dev/snd
+    command: ["/data/satellite.toml"]
+    restart: unless-stopped
+
+  avahi:
+    build:
+      context: ./avahi
+    container_name: wyoming-avahi
+    network_mode: host
+    environment:
+      - SATELLITE_NAME=Wyoming Satellite
+      - SATELLITE_PORT=10700
+    restart: unless-stopped

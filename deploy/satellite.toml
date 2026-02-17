@@ -1,0 +1,29 @@
+# Production Wyoming satellite configuration for Raspberry Pi Zero W.
+#
+# Adjust [satellite].name and [satellite].area to match your deployment.
+# Use `arecord -L` and `aplay -L` on the Pi to find your ALSA device names.
+
+[satellite]
+name = "pi-satellite"
+area = "Living Room"
+
+[server]
+mode = "listen"
+host = "0.0.0.0"
+port = 10700
+
+[audio]
+device = "plughw:0,0"
+playback_device = "plughw:0,0"
+rate = 16000
+width = 2
+channels = 1
+chunk_ms = 20
+
+[vad]
+mode = "energy"
+threshold = 1000
+silence_timeout_ms = 2500
+
+[[feedback]]
+method = "log"

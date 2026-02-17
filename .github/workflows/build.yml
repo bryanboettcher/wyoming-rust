@@ -34,6 +34,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: false
           load: true
           tags: ${{ env.IMAGE_NAME }}:x86_64
@@ -45,6 +46,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:x86_64
           cache-from: type=gha,scope=x86_64
@@ -63,6 +65,9 @@ jobs:
         include:
           - target: arm-unknown-linux-gnueabihf
             tag: armv6
+            # debian:bookworm-slim has no linux/arm/v6 manifest; use arm/v5 instead.
+            # Docker clients on arm/v6 devices (Pi Zero W) fall back to arm/v5 automatically.
+            platform: linux/arm/v5
             build-args: |
               RUST_TARGET=arm-unknown-linux-gnueabihf
               USE_ARMV6_TOOLCHAIN=1
@@ -71,6 +76,7 @@ jobs:
               RUSTFLAGS_EXTRA=-C target-cpu=arm1176jzf-s
           - target: armv7-unknown-linux-gnueabihf
             tag: armv7
+            platform: linux/arm/v7
             build-args: |
               RUST_TARGET=armv7-unknown-linux-gnueabihf
               CROSS_PKG=gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
@@ -78,6 +84,7 @@ jobs:
               STRIP_CMD=arm-linux-gnueabihf-strip
           - target: aarch64-unknown-linux-gnu
             tag: arm64
+            platform: linux/arm64
             build-args: |
               RUST_TARGET=aarch64-unknown-linux-gnu
               CROSS_PKG=gcc-aarch64-linux-gnu libc6-dev-arm64-cross
@@ -85,6 +92,7 @@ jobs:
               STRIP_CMD=aarch64-linux-gnu-strip
           - target: i686-unknown-linux-gnu
             tag: i686
+            platform: linux/386
             build-args: |
               RUST_TARGET=i686-unknown-linux-gnu
               CROSS_PKG=gcc-multilib libc6-dev-i386
@@ -106,6 +114,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: ${{ matrix.platform }}
           push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}
           build-args: ${{ matrix.build-args }}

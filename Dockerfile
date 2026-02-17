@@ -3,13 +3,25 @@
 # Supports native builds and cross-compilation to multiple ARM targets.
 # Uses build ARGs to configure toolchain installation dynamically.
 #
+# The builder stage always runs on the CI runner's native platform ($BUILDPLATFORM)
+# and cross-compiles via Rust's target system. The runtime stage uses $TARGETPLATFORM
+# to pull the correct architecture variant of debian:bookworm-slim, ensuring the
+# final image has correct platform metadata for Docker manifest matching.
+#
+# IMPORTANT: All builds should use `docker buildx build --platform <target>` to set
+# $BUILDPLATFORM and $TARGETPLATFORM automatically. For ARMv6, use --platform=linux/arm/v5
+# because debian:bookworm-slim does not publish a linux/arm/v6 variant (arm/v6 clients
+# will fall back to arm/v5 automatically).
+#
 # Build Examples:
 #
 # Native x86_64 (default):
-#   docker build -t wyoming-satellite:x86_64 .
+#   docker buildx build --platform linux/amd64 \
+#     -t wyoming-satellite:x86_64 .
 #
 # ARMv6 (Raspberry Pi Zero W v1.1):
-#   docker build --build-arg RUST_TARGET=arm-unknown-linux-gnueabihf \
+#   docker buildx build --platform linux/arm/v5 \
+#     --build-arg RUST_TARGET=arm-unknown-linux-gnueabihf \
 #     --build-arg USE_ARMV6_TOOLCHAIN=1 \
 #     --build-arg LINKER=armv6-rpi-linux-gnueabihf-gcc \
 #     --build-arg STRIP_CMD=armv6-rpi-linux-gnueabihf-strip \
@@ -18,7 +30,8 @@
 #     -t wyoming-satellite:armv6 .
 #
 # ARMv7 (Raspberry Pi 2/3/4):
-#   docker build --build-arg RUST_TARGET=armv7-unknown-linux-gnueabihf \
+#   docker buildx build --platform linux/arm/v7 \
+#     --build-arg RUST_TARGET=armv7-unknown-linux-gnueabihf \
 #     --build-arg CROSS_PKG="gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libasound2-dev:armhf" \
 #     --build-arg LINKER=arm-linux-gnueabihf-gcc \
 #     --build-arg STRIP_CMD=arm-linux-gnueabihf-strip \
@@ -26,7 +39,8 @@
 #     -t wyoming-satellite:armv7 .
 #
 # ARM64 (Raspberry Pi 3/4/5):
-#   docker build --build-arg RUST_TARGET=aarch64-unknown-linux-gnu \
+#   docker buildx build --platform linux/arm64 \
+#     --build-arg RUST_TARGET=aarch64-unknown-linux-gnu \
 #     --build-arg CROSS_PKG="gcc-aarch64-linux-gnu libc6-dev-arm64-cross libasound2-dev:arm64" \
 #     --build-arg LINKER=aarch64-linux-gnu-gcc \
 #     --build-arg STRIP_CMD=aarch64-linux-gnu-strip \
@@ -34,7 +48,8 @@
 #     -t wyoming-satellite:arm64 .
 #
 # i686 (32-bit x86):
-#   docker build --build-arg RUST_TARGET=i686-unknown-linux-gnu \
+#   docker buildx build --platform linux/386 \
+#     --build-arg RUST_TARGET=i686-unknown-linux-gnu \
 #     --build-arg CROSS_PKG="gcc-multilib libc6-dev-i386 libasound2-dev:i386" \
 #     --build-arg CROSS_PKG_CONFIG_LIBDIR=/usr/lib/i386-linux-gnu/pkgconfig \
 #     -t wyoming-satellite:i686 .
@@ -42,7 +57,9 @@
 # ---------------------------------------------------------------------------
 # Builder Stage
 # ---------------------------------------------------------------------------
-FROM rust:1.84-bookworm AS builder
+# Always run the builder on the CI runner's native platform (amd64) since
+# we cross-compile via Rust/cargo, not via QEMU emulation.
+FROM --platform=$BUILDPLATFORM rust:1.84-bookworm AS builder
 
 ARG RUST_TARGET=x86_64-unknown-linux-gnu
 ARG LINKER=""
@@ -194,7 +211,17 @@ RUN mkdir -p /output && \
 # ---------------------------------------------------------------------------
 # Runtime Stage
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim
+# $TARGETPLATFORM is set by buildx when --platform is passed to the build.
+# This ensures the final image carries correct platform metadata so Docker
+# can match it on the target hardware (e.g., a Pi Zero W requesting
+# linux/arm/v6 will match linux/arm/v5 via variant fallback).
+#
+# NOTE: debian:bookworm-slim does NOT publish a linux/arm/v6 manifest.
+# For the ARMv6 (Pi Zero W) build, CI passes --platform=linux/arm/v5 which
+# Debian does support. Docker clients on arm/v6 devices automatically fall
+# back to arm/v5 images. The ARMv6 binary runs fine on arm/v5 userland
+# since the kernel is ARMv6-capable and glibc is forward-compatible.
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim
 
 ARG RUST_TARGET=x86_64-unknown-linux-gnu
 

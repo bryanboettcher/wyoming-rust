@@ -90,6 +90,11 @@ pub fn transition(state: &SatelliteState, input: &SatelliteInput) -> (SatelliteS
             Streaming,
             vec![Action::SetFeedback(FeedbackState::Listening), Action::StartCapture, Action::SendAudioStart, Action::SendStreamingStarted],
         ),
+        // Server-initiated TTS (announcement): HA sends audio-start while we're idle
+        (Idle, ServerTtsStart) => (
+            Responding,
+            vec![Action::StopCapture, Action::SetFeedback(FeedbackState::Speaking), Action::StartPlayback],
+        ),
 
         // ── STREAMING ─────────────────────────────────────
         (Streaming, SilenceTimeout) => (

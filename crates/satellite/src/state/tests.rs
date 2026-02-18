@@ -85,8 +85,18 @@ fn idle_ignores_server_voice_started() {
 }
 
 #[test]
-fn idle_ignores_server_tts_start() {
-    assert_no_op(SatelliteState::Idle, SatelliteInput::ServerTtsStart);
+fn idle_handles_server_tts_start_for_announcement() {
+    // Server-initiated TTS (announcement): HA sends audio-start while satellite is idle
+    assert_transition(
+        SatelliteState::Idle,
+        SatelliteInput::ServerTtsStart,
+        SatelliteState::Responding,
+        vec![
+            Action::StopCapture,
+            Action::SetFeedback(FeedbackState::Speaking),
+            Action::StartPlayback,
+        ],
+    );
 }
 
 #[test]
@@ -844,6 +854,44 @@ fn voice_stopped_exits_responding() {
     assert_eq!(new_state, SatelliteState::Idle);
     assert!(actions.contains(&Action::StopPlayback));
     assert!(actions.contains(&Action::SendPlayed));
+}
+
+#[test]
+fn announcement_flow_idle_to_responding_to_idle() {
+    // Server-initiated announcement: HA sends audio-start while satellite is idle,
+    // streams TTS audio, then sends audio-stop.
+    let mut state = SatelliteState::Idle;
+
+    // audio-start arrives in Idle -> Responding
+    let (new_state, actions) = transition(&state, &SatelliteInput::ServerTtsStart);
+    assert_eq!(new_state, SatelliteState::Responding);
+    assert_eq!(
+        actions,
+        vec![
+            Action::StopCapture,
+            Action::SetFeedback(FeedbackState::Speaking),
+            Action::StartPlayback,
+        ]
+    );
+    state = new_state;
+
+    // audio-stop arrives -> back to Idle
+    let (new_state, actions) = transition(&state, &SatelliteInput::ServerTtsStop);
+    assert_eq!(new_state, SatelliteState::Idle);
+    assert_eq!(
+        actions,
+        vec![
+            Action::StopPlayback,
+            Action::SendPlayed,
+            Action::SendStreamingStopped,
+            Action::SetFeedback(FeedbackState::Idle),
+        ]
+    );
+    state = new_state;
+
+    // Satellite should be ready for normal conversation after announcement
+    let (new_state, _) = transition(&state, &SatelliteInput::VoiceDetected);
+    assert_eq!(new_state, SatelliteState::Streaming);
 }
 
 #[test]

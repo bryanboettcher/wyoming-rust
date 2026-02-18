@@ -239,9 +239,12 @@ RUN mkdir -p /runtime-libs && \
         && mkdir -p /runtime-libs/usr/lib/arm-linux-gnueabihf \
         && cp -a $SYSROOT/lib/*.so* /runtime-libs/usr/lib/arm-linux-gnueabihf/ \
         && cp -a $SYSROOT/usr/lib/libasound.so* /runtime-libs/usr/lib/arm-linux-gnueabihf/ \
-        && LIBGCC=$(find /opt/x-tools/armv6-rpi-linux-gnueabihf -name 'libgcc_s.so.1' | head -1) \
+        && LIBGCC=$(find /opt/x-tools/armv6-rpi-linux-gnueabihf -name 'libgcc_s.so.1' -print -quit) \
         && if [ -n "$LIBGCC" ]; then \
-            cp -a "$LIBGCC" /runtime-libs/usr/lib/arm-linux-gnueabihf/; \
+            echo "Found libgcc_s.so.1 at: $LIBGCC" \
+            && cp -aL "$LIBGCC" /runtime-libs/usr/lib/arm-linux-gnueabihf/; \
+        else \
+            echo "WARNING: libgcc_s.so.1 not found in toolchain!" >&2 && exit 1; \
         fi \
         && mkdir -p /runtime-libs/etc \
         && : > /runtime-libs/etc/ld.so.cache; \

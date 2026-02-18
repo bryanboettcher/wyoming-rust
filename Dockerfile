@@ -8,10 +8,18 @@
 # to pull the correct architecture variant of debian:bookworm-slim, ensuring the
 # final image has correct platform metadata for Docker manifest matching.
 #
+# ARMv6 (Pi Zero W) special handling:
+# Debian does not publish linux/arm/v6 images, so the runtime uses linux/arm/v7
+# (armhf). However, Debian's arm/v7 system libraries (glibc, libasound2, etc.)
+# contain ARMv7 instructions that SIGILL on ARMv6 hardware. To fix this, the
+# builder stage prepares a /runtime-libs/ directory containing ARMv6-compiled
+# shared libraries from the tttapa cross-toolchain sysroot plus our cross-compiled
+# alsa-lib. These are overlaid onto the runtime image, replacing the arm/v7 libs
+# with ARMv6-safe equivalents. The ld.so.cache is then regenerated to pick up the
+# new libraries.
+#
 # IMPORTANT: All builds should use `docker buildx build --platform <target>` to set
-# $BUILDPLATFORM and $TARGETPLATFORM automatically. For ARMv6, use --platform=linux/arm/v5
-# because debian:bookworm-slim does not publish a linux/arm/v6 variant (arm/v6 clients
-# will fall back to arm/v5 automatically).
+# $BUILDPLATFORM and $TARGETPLATFORM automatically.
 #
 # Build Examples:
 #
@@ -20,7 +28,7 @@
 #     -t wyoming-satellite:x86_64 .
 #
 # ARMv6 (Raspberry Pi Zero W v1.1):
-#   docker buildx build --platform linux/arm/v5 \
+#   docker buildx build --platform linux/arm/v7 \
 #     --build-arg RUST_TARGET=arm-unknown-linux-gnueabihf \
 #     --build-arg USE_ARMV6_TOOLCHAIN=1 \
 #     --build-arg LINKER=armv6-rpi-linux-gnueabihf-gcc \
@@ -215,24 +223,36 @@ RUN mkdir -p /output && \
         cp target/$RUST_TARGET/release/wyoming-satellite /output/wyoming-satellite; \
     fi
 
+# Prepare ARMv6 runtime libraries overlay
+# For ARMv6 builds, copy the tttapa sysroot's shared libraries (glibc, libm,
+# libpthread, ld-linux-armhf, nss modules, etc.) plus our cross-compiled
+# libasound into Debian's armhf multiarch paths. These will overlay the arm/v7
+# libraries in the runtime image, replacing them with ARMv6-safe equivalents.
+# Always create /runtime-libs so the COPY in the runtime stage succeeds for all targets.
+RUN mkdir -p /runtime-libs && \
+    if [ -n "$USE_ARMV6_TOOLCHAIN" ]; then \
+        SYSROOT=/opt/x-tools/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot \
+        && mkdir -p /runtime-libs/lib/arm-linux-gnueabihf \
+        && mkdir -p /runtime-libs/usr/lib/arm-linux-gnueabihf \
+        && cp -a $SYSROOT/lib/*.so* /runtime-libs/lib/arm-linux-gnueabihf/ \
+        && cp -a $SYSROOT/usr/lib/libasound.so* /runtime-libs/usr/lib/arm-linux-gnueabihf/ \
+        && LIBGCC=$(find /opt/x-tools/armv6-rpi-linux-gnueabihf -name 'libgcc_s.so.1' | head -1) \
+        && if [ -n "$LIBGCC" ]; then \
+            cp -a "$LIBGCC" /runtime-libs/lib/arm-linux-gnueabihf/; \
+        fi; \
+    fi
+
 # ---------------------------------------------------------------------------
 # Runtime Stage
 # ---------------------------------------------------------------------------
 # $TARGETPLATFORM is set by buildx when --platform is passed to the build.
 # This ensures the final image carries correct platform metadata so Docker
-# can match it on the target hardware (e.g., a Pi Zero W requesting
-# linux/arm/v6 will match linux/arm/v5 via variant fallback).
+# can match it on the target hardware.
 #
-# NOTE: debian:bookworm-slim does NOT publish a linux/arm/v6 manifest.
-# For the ARMv6 (Pi Zero W) build, CI passes --platform=linux/arm/v5 which
-# Debian does support. Docker clients on arm/v6 devices automatically fall
-# back to arm/v5 images. The ARMv6 binary runs fine on arm/v5 userland
-# since the kernel is ARMv6-capable and glibc is forward-compatible.
-# $TARGETPLATFORM is the default for FROM, so --platform is omitted to avoid
-# the BuildKit RedundantTargetPlatform warning. The correct platform variant
-# is selected automatically when `docker buildx build --platform <target>` is used.
-# For ARMv6 builds (platform linux/arm/v6), we need to explicitly use linux/arm/v7
-# for the base image since Debian does not publish arm/v6. The armhf userland works fine.
+# For ARMv6 builds, the platform is linux/arm/v7 (Debian's armhf). The arm/v7
+# system libraries would normally SIGILL on ARMv6 hardware, but the COPY of
+# /runtime-libs/ below overlays ARMv6-safe libraries from the tttapa sysroot.
+# DEBIAN_PLATFORM allows CI to override the base image platform if needed.
 ARG DEBIAN_PLATFORM=${TARGETPLATFORM}
 FROM --platform=${DEBIAN_PLATFORM} debian:bookworm-slim
 
@@ -249,6 +269,26 @@ RUN apt-get update \
         ca-certificates \
         libasound2 \
     && rm -rf /var/lib/apt/lists/*
+
+# Overlay ARMv6 sysroot libraries on top of Debian's arm/v7 libs.
+# For non-ARMv6 builds, /runtime-libs/ is empty so this is a no-op.
+COPY --from=builder /runtime-libs/ /
+
+# Re-declare USE_ARMV6_TOOLCHAIN in the runtime stage (ARGs don't survive FROM)
+ARG USE_ARMV6_TOOLCHAIN=""
+
+# Delete the ld.so.cache so the dynamic linker doesn't use cached paths to
+# the old arm/v7 versioned .so files. ldconfig would be better but may not
+# work correctly in cross-platform builds; deleting the cache forces the
+# linker to search lib directories at runtime.
+RUN if [ -n "$USE_ARMV6_TOOLCHAIN" ]; then \
+        rm -f /etc/ld.so.cache; \
+    fi
+
+# ALSA config path fix: alsa-lib was cross-compiled with --prefix pointing to
+# the tttapa sysroot, so its compiled-in config dir doesn't exist in the
+# runtime container. Point ALSA to the Debian-provided config files instead.
+ENV ALSA_CONFIG_DIR=/usr/share/alsa
 
 COPY --from=builder /output/wyoming-satellite /usr/local/bin/wyoming-satellite
 

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use wyoming::audio::{AudioChunk, AudioFormat, AudioStart, AudioStop};
 use wyoming::event::{Eventable, ProtocolError};
-use wyoming::info::SatelliteInfo;
+use wyoming::info::{Attribution, SatelliteInfo};
 use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
@@ -47,7 +47,11 @@ impl SatelliteService {
     pub fn new(config: &Config) -> Result<Self, Box<dyn std::error::Error>> {
         let sat_info = SatelliteInfo {
             name: config.satellite.name.clone(),
+            attribution: Attribution::default(),
+            installed: true,
             area: config.satellite.area.clone(),
+            description: Some(config.satellite.name.clone()),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
             has_mic: true,
             has_snd: config.audio.playback_device.is_some()
                 || config.audio.wav_output.is_some()

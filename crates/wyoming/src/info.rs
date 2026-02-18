@@ -32,12 +32,27 @@ pub struct Info {
     pub satellite: Option<SatelliteInfo>,
 }
 
+/// Attribution metadata for an artifact (required by HA's Wyoming Python library).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Attribution {
+    pub name: String,
+    pub url: String,
+}
+
 /// Information about this satellite.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SatelliteInfo {
     pub name: String,
     #[serde(default)]
+    pub attribution: Attribution,
+    #[serde(default)]
+    pub installed: bool,
+    #[serde(default)]
     pub area: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
     #[serde(default)]
     pub has_mic: bool,
     #[serde(default)]

@@ -569,7 +569,14 @@ fn test_info_round_trip() {
     let original = Info {
         satellite: Some(SatelliteInfo {
             name: "test-satellite".into(),
+            attribution: Attribution {
+                name: "".into(),
+                url: "".into(),
+            },
+            installed: true,
             area: Some("living-room".into()),
+            description: Some("Test satellite".into()),
+            version: Some("0.1.0".into()),
             has_mic: true,
             has_snd: true,
         }),
@@ -596,7 +603,11 @@ fn test_info_minimal_satellite() {
     let original = Info {
         satellite: Some(SatelliteInfo {
             name: "minimal".into(),
+            attribution: Attribution::default(),
+            installed: true,
             area: None,
+            description: None,
+            version: None,
             has_mic: false,
             has_snd: false,
         }),
@@ -895,7 +906,11 @@ fn test_full_round_trip_info_wire_and_eventable() {
     let original_info = Info {
         satellite: Some(SatelliteInfo {
             name: "wyoming-satellite-1".into(),
+            attribution: Attribution::default(),
+            installed: true,
             area: Some("bedroom".into()),
+            description: Some("wyoming-satellite-1".into()),
+            version: Some("0.1.0".into()),
             has_mic: true,
             has_snd: false,
         }),
@@ -1083,6 +1098,11 @@ fn test_python_compat_info_with_satellite() {
     assert_eq!(sat.area, Some("kitchen".into()));
     assert!(sat.has_mic);
     assert!(!sat.has_snd);
+    // Fields missing from wire JSON should get serde defaults
+    assert_eq!(sat.attribution, Attribution::default());
+    assert!(!sat.installed);
+    assert_eq!(sat.description, None);
+    assert_eq!(sat.version, None);
 }
 
 // ============================================================================

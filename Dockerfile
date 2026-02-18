@@ -242,7 +242,9 @@ RUN mkdir -p /runtime-libs && \
         && LIBGCC=$(find /opt/x-tools/armv6-rpi-linux-gnueabihf -name 'libgcc_s.so.1' | head -1) \
         && if [ -n "$LIBGCC" ]; then \
             cp -a "$LIBGCC" /runtime-libs/usr/lib/arm-linux-gnueabihf/; \
-        fi; \
+        fi \
+        && mkdir -p /runtime-libs/etc \
+        && : > /runtime-libs/etc/ld.so.cache; \
     fi
 
 # ---------------------------------------------------------------------------
@@ -273,18 +275,11 @@ RUN apt-get update \
 
 # Overlay ARMv6 sysroot libraries on top of Debian's arm/v7 libs.
 # For non-ARMv6 builds, /runtime-libs/ is empty so this is a no-op.
+# For ARMv6 builds, the overlay also includes an empty /etc/ld.so.cache to
+# prevent the dynamic linker from using cached paths to the old arm/v7 .so files.
+# (We can't use a RUN to delete it because the glibc downgrade from 2.36 to 2.31
+# breaks the container's own /bin/sh.)
 COPY --from=builder /runtime-libs/ /
-
-# Re-declare USE_ARMV6_TOOLCHAIN in the runtime stage (ARGs don't survive FROM)
-ARG USE_ARMV6_TOOLCHAIN=""
-
-# Delete the ld.so.cache so the dynamic linker doesn't use cached paths to
-# the old arm/v7 versioned .so files. ldconfig would be better but may not
-# work correctly in cross-platform builds; deleting the cache forces the
-# linker to search lib directories at runtime.
-RUN if [ -n "$USE_ARMV6_TOOLCHAIN" ]; then \
-        rm -f /etc/ld.so.cache; \
-    fi
 
 # ALSA config path fix: alsa-lib was cross-compiled with --prefix pointing to
 # the tttapa sysroot, so its compiled-in config dir doesn't exist in the

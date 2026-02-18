@@ -286,6 +286,15 @@ COPY --from=builder /runtime-libs/ /
 # runtime container. Point ALSA to the Debian-provided config files instead.
 ENV ALSA_CONFIG_DIR=/usr/share/alsa
 
+# Tell the dynamic linker where to find shared libraries in Debian's multiarch
+# directory. The tttapa sysroot's ld-linux-armhf.so.3 only searches /lib and
+# /usr/lib by default, and we emptied ld.so.cache (can't regenerate it after
+# the glibc downgrade). Without this, ARMv6 builds fail with "cannot open
+# shared object file" for libs in /usr/lib/arm-linux-gnueabihf/.
+# Harmless on non-ARMv6 builds (the cache still works, this just adds a
+# redundant search path).
+ENV LD_LIBRARY_PATH=/usr/lib/arm-linux-gnueabihf
+
 COPY --from=builder /output/wyoming-satellite /usr/local/bin/wyoming-satellite
 
 ENTRYPOINT ["wyoming-satellite"]

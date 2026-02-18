@@ -67,12 +67,11 @@ jobs:
             tag: armv6
             # The binary is compiled for armhf (hard float) which needs /lib/ld-linux-armhf.so.3.
             # linux/arm/v5 is armel (soft float) with a different dynamic linker, causing exec failures.
-            # Pi Zero W v1.1 requires linux/arm/v6 platform for proper image selection.
-            platform: linux/arm/v6
+            # ARMv7 images work on ARMv6 hardware; Docker falls back from v6 to v7 automatically.
+            platform: linux/arm/v7
             build-args: |
               RUST_TARGET=arm-unknown-linux-gnueabihf
               USE_ARMV6_TOOLCHAIN=1
-              DEBIAN_PLATFORM=linux/arm/v7
               LINKER=armv6-rpi-linux-gnueabihf-gcc
               STRIP_CMD=armv6-rpi-linux-gnueabihf-strip
               RUSTFLAGS_EXTRA=-C target-cpu=arm1176jzf-s

@@ -5,7 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use wyoming::event::{self, Event, Eventable, ProtocolError};
-use wyoming::info::{Describe, Info, SatelliteInfo};
+use wyoming::info::{Describe, Info, MicProgram, SatelliteInfo, SndProgram};
 use wyoming::satellite::RunSatellite;
 
 use crate::config::ServerConfig;
@@ -42,6 +42,8 @@ impl Connection {
     pub fn connect(
         config: &ServerConfig,
         sat_info: &SatelliteInfo,
+        mic_programs: &[MicProgram],
+        snd_programs: &[SndProgram],
     ) -> Result<Self, ConnectionError> {
         let addr = format!("{}:{}", config.host, config.port);
         log::info!("Connecting to {}", addr);
@@ -54,7 +56,7 @@ impl Connection {
         let mut conn = Self { reader, writer };
 
         // Handshake: server sends `describe`, we reply with `info`
-        conn.handle_describe(sat_info)?;
+        conn.handle_describe(sat_info, mic_programs, snd_programs)?;
 
         Ok(conn)
     }
@@ -66,6 +68,8 @@ impl Connection {
     pub fn from_stream(
         stream: TcpStream,
         sat_info: &SatelliteInfo,
+        mic_programs: &[MicProgram],
+        snd_programs: &[SndProgram],
     ) -> Result<Self, ConnectionError> {
         stream.set_nodelay(true)?;
 
@@ -74,13 +78,18 @@ impl Connection {
         let mut conn = Self { reader, writer };
 
         // Same handshake: HA sends `describe`, we reply with `info`
-        conn.handle_describe(sat_info)?;
+        conn.handle_describe(sat_info, mic_programs, snd_programs)?;
 
         Ok(conn)
     }
 
     /// Handle the describe/info handshake.
-    fn handle_describe(&mut self, sat_info: &SatelliteInfo) -> Result<(), ConnectionError> {
+    fn handle_describe(
+        &mut self,
+        sat_info: &SatelliteInfo,
+        mic_programs: &[MicProgram],
+        snd_programs: &[SndProgram],
+    ) -> Result<(), ConnectionError> {
         let event = event::read_event(&mut self.reader)?;
 
         if event.event_type != Describe::EVENT_TYPE {
@@ -94,6 +103,13 @@ impl Connection {
 
         let info = Info {
             satellite: Some(sat_info.clone()),
+            asr: vec![],
+            tts: vec![],
+            handle: vec![],
+            intent: vec![],
+            wake: vec![],
+            mic: mic_programs.to_vec(),
+            snd: snd_programs.to_vec(),
         };
         self.send(info)?;
         Ok(())
@@ -175,6 +191,8 @@ impl Connection {
 pub fn connect_with_retry(
     config: &ServerConfig,
     sat_info: &SatelliteInfo,
+    mic_programs: &[MicProgram],
+    snd_programs: &[SndProgram],
     max_attempts: Option<u32>,
 ) -> Result<Connection, ConnectionError> {
     let mut delay = Duration::from_secs(1);
@@ -183,7 +201,7 @@ pub fn connect_with_retry(
 
     loop {
         attempt += 1;
-        match Connection::connect(config, sat_info) {
+        match Connection::connect(config, sat_info, mic_programs, snd_programs) {
             Ok(conn) => return Ok(conn),
             Err(e) => {
                 if let Some(max) = max_attempts {

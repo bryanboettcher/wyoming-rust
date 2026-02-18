@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use wyoming::audio::{AudioChunk, AudioFormat, AudioStart, AudioStop};
 use wyoming::event::{Eventable, ProtocolError};
-use wyoming::info::{Attribution, SatelliteInfo};
+use wyoming::info::{Attribution, MicProgram, SatelliteInfo, SndProgram};
 use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
@@ -26,6 +26,8 @@ pub struct SatelliteService {
     mode: ConnectionMode,
     conn: Option<Connection>,
     sat_info: SatelliteInfo,
+    mic_programs: Vec<MicProgram>,
+    snd_programs: Vec<SndProgram>,
     mic: Box<dyn AudioSource>,
     spk: Box<dyn AudioSink>,
     vad: Box<dyn Vad>,
@@ -52,10 +54,37 @@ impl SatelliteService {
             area: config.satellite.area.clone(),
             description: Some(config.satellite.name.clone()),
             version: Some(env!("CARGO_PKG_VERSION").into()),
-            has_mic: true,
-            has_snd: config.audio.playback_device.is_some()
-                || config.audio.wav_output.is_some()
-                || config.audio.device.is_some(),
+            has_vad: Some(true),
+            active_wake_words: None,
+            max_active_wake_words: None,
+            supports_trigger: Some(false),
+        };
+
+        let audio_format = config.audio.audio_format();
+
+        let mic_programs = vec![MicProgram {
+            name: config.satellite.name.clone(),
+            attribution: Attribution::default(),
+            installed: true,
+            description: None,
+            version: Some(env!("CARGO_PKG_VERSION").into()),
+            mic_format: audio_format,
+        }];
+
+        let has_snd = config.audio.playback_device.is_some()
+            || config.audio.wav_output.is_some()
+            || config.audio.device.is_some();
+        let snd_programs = if has_snd {
+            vec![SndProgram {
+                name: config.satellite.name.clone(),
+                attribution: Attribution::default(),
+                installed: true,
+                description: None,
+                version: Some(env!("CARGO_PKG_VERSION").into()),
+                snd_format: audio_format,
+            }]
+        } else {
+            vec![]
         };
 
         let mic = create_audio_source(config)?;
@@ -72,13 +101,14 @@ impl SatelliteService {
             ConnectionMode::Connect
         };
 
-        let audio_format = config.audio.audio_format();
         let silence_timeout = Duration::from_millis(config.vad.silence_timeout_ms());
 
         Ok(Self {
             mode,
             conn: None,
             sat_info,
+            mic_programs,
+            snd_programs,
             mic,
             spk,
             vad,
@@ -100,10 +130,10 @@ impl SatelliteService {
                 log::info!("Waiting for client connection...");
                 let (stream, addr) = listener.accept()?;
                 log::info!("Client connected from {}", addr);
-                Connection::from_stream(stream, &self.sat_info)?
+                Connection::from_stream(stream, &self.sat_info, &self.mic_programs, &self.snd_programs)?
             }
             ConnectionMode::Connect => {
-                connect_with_retry(&self.config.server, &self.sat_info, None)?
+                connect_with_retry(&self.config.server, &self.sat_info, &self.mic_programs, &self.snd_programs, None)?
             }
         };
         self.conn = Some(conn);

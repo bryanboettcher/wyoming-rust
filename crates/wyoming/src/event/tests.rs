@@ -1,7 +1,9 @@
 use super::*;
 use crate::audio::*;
 use crate::asr::*;
+use crate::handle::*;
 use crate::info::*;
+use crate::intent::*;
 use crate::pipeline::*;
 use crate::satellite::*;
 use crate::timer::*;
@@ -442,6 +444,50 @@ fn test_transcript_minimal() {
 }
 
 // ============================================================================
+// Eventable Trait Round-Trip Tests - ASR Streaming Events
+// ============================================================================
+
+#[test]
+fn test_transcript_start_round_trip() {
+    let original = TranscriptStart {
+        context: Some(serde_json::json!({"session": "abc"})),
+        language: Some("en".into()),
+    };
+    let event = original.clone().into_event();
+    let decoded = TranscriptStart::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_transcript_start_minimal() {
+    let original = TranscriptStart {
+        context: None,
+        language: None,
+    };
+    let event = original.clone().into_event();
+    let decoded = TranscriptStart::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_transcript_chunk_round_trip() {
+    let original = TranscriptChunk {
+        text: "partial text".into(),
+    };
+    let event = original.clone().into_event();
+    let decoded = TranscriptChunk::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_transcript_stop_round_trip() {
+    let original = TranscriptStop;
+    let event = original.into_event();
+    let decoded = TranscriptStop::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+// ============================================================================
 // Eventable Trait Round-Trip Tests - TTS Events
 // ============================================================================
 
@@ -454,6 +500,7 @@ fn test_synthesize_round_trip() {
             language: Some("en".into()),
             speaker: Some("speaker-1".into()),
         }),
+        context: Some(serde_json::json!({"pipeline_id": "xyz"})),
     };
 
     let event = original.clone().into_event();
@@ -467,6 +514,7 @@ fn test_synthesize_minimal() {
     let original = Synthesize {
         text: "Test".into(),
         voice: None,
+        context: None,
     };
 
     let event = original.clone().into_event();
@@ -484,11 +532,68 @@ fn test_synthesize_partial_voice() {
             language: None,
             speaker: None,
         }),
+        context: None,
     };
 
     let event = original.clone().into_event();
     let decoded = Synthesize::from_event(event).unwrap();
 
+    assert_eq!(decoded, original);
+}
+
+// ============================================================================
+// Eventable Trait Round-Trip Tests - TTS Streaming Events
+// ============================================================================
+
+#[test]
+fn test_synthesize_start_round_trip() {
+    let original = SynthesizeStart {
+        voice: Some(SynthesizeVoice {
+            name: Some("piper".into()),
+            language: Some("en".into()),
+            speaker: None,
+        }),
+        context: Some(serde_json::json!({"streaming": true})),
+    };
+    let event = original.clone().into_event();
+    let decoded = SynthesizeStart::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_synthesize_start_minimal() {
+    let original = SynthesizeStart {
+        voice: None,
+        context: None,
+    };
+    let event = original.clone().into_event();
+    let decoded = SynthesizeStart::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_synthesize_chunk_round_trip() {
+    let original = SynthesizeChunk {
+        text: "Hello ".into(),
+    };
+    let event = original.clone().into_event();
+    let decoded = SynthesizeChunk::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_synthesize_stop_round_trip() {
+    let original = SynthesizeStop;
+    let event = original.into_event();
+    let decoded = SynthesizeStop::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_synthesize_stopped_round_trip() {
+    let original = SynthesizeStopped;
+    let event = original.into_event();
+    let decoded = SynthesizeStopped::from_event(event).unwrap();
     assert_eq!(decoded, original);
 }
 
@@ -577,9 +682,18 @@ fn test_info_round_trip() {
             area: Some("living-room".into()),
             description: Some("Test satellite".into()),
             version: Some("0.1.0".into()),
-            has_mic: true,
-            has_snd: true,
+            has_vad: Some(true),
+            active_wake_words: None,
+            max_active_wake_words: None,
+            supports_trigger: Some(false),
         }),
+        asr: vec![],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![],
+        snd: vec![],
     };
 
     let event = original.clone().into_event();
@@ -590,7 +704,16 @@ fn test_info_round_trip() {
 
 #[test]
 fn test_info_no_satellite() {
-    let original = Info { satellite: None };
+    let original = Info {
+        satellite: None,
+        asr: vec![],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![],
+        snd: vec![],
+    };
 
     let event = original.clone().into_event();
     let decoded = Info::from_event(event).unwrap();
@@ -608,9 +731,165 @@ fn test_info_minimal_satellite() {
             area: None,
             description: None,
             version: None,
-            has_mic: false,
-            has_snd: false,
+            has_vad: None,
+            active_wake_words: None,
+            max_active_wake_words: None,
+            supports_trigger: None,
         }),
+        asr: vec![],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![],
+        snd: vec![],
+    };
+
+    let event = original.clone().into_event();
+    let decoded = Info::from_event(event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_info_with_mic_and_snd_programs() {
+    let original = Info {
+        satellite: Some(SatelliteInfo {
+            name: "full-satellite".into(),
+            attribution: Attribution::default(),
+            installed: true,
+            area: Some("kitchen".into()),
+            description: None,
+            version: Some("1.0.0".into()),
+            has_vad: Some(true),
+            active_wake_words: Some(vec!["ok_nabu".into()]),
+            max_active_wake_words: Some(1),
+            supports_trigger: Some(false),
+        }),
+        asr: vec![],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![MicProgram {
+            name: "my-mic".into(),
+            attribution: Attribution::default(),
+            installed: true,
+            description: None,
+            version: None,
+            mic_format: AudioFormat::WYOMING_DEFAULT,
+        }],
+        snd: vec![SndProgram {
+            name: "my-snd".into(),
+            attribution: Attribution::default(),
+            installed: true,
+            description: None,
+            version: None,
+            snd_format: AudioFormat::WYOMING_DEFAULT,
+        }],
+    };
+
+    let event = original.clone().into_event();
+    let decoded = Info::from_event(event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_info_with_asr_programs() {
+    let original = Info {
+        satellite: None,
+        asr: vec![AsrProgram {
+            name: "whisper".into(),
+            attribution: Attribution { name: "OpenAI".into(), url: "https://openai.com".into() },
+            installed: true,
+            description: Some("Whisper ASR".into()),
+            version: Some("1.0".into()),
+            models: vec![AsrModel {
+                name: "base".into(),
+                attribution: Attribution::default(),
+                installed: true,
+                description: None,
+                version: None,
+                languages: vec!["en".into(), "fr".into()],
+            }],
+            supports_transcript_streaming: true,
+        }],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![],
+        snd: vec![],
+    };
+
+    let event = original.clone().into_event();
+    let decoded = Info::from_event(event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_info_with_tts_programs() {
+    let original = Info {
+        satellite: None,
+        asr: vec![],
+        tts: vec![TtsProgram {
+            name: "piper".into(),
+            attribution: Attribution::default(),
+            installed: true,
+            description: None,
+            version: Some("1.2.0".into()),
+            voices: vec![TtsVoice {
+                name: "alan".into(),
+                attribution: Attribution::default(),
+                installed: true,
+                description: None,
+                version: None,
+                languages: vec!["en-US".into()],
+                speakers: Some(vec![TtsVoiceSpeaker { name: "p270".into() }]),
+            }],
+            supports_synthesize_streaming: false,
+        }],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![],
+        snd: vec![],
+    };
+
+    let event = original.clone().into_event();
+    let decoded = Info::from_event(event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_info_with_wake_programs() {
+    let original = Info {
+        satellite: None,
+        asr: vec![],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![WakeProgram {
+            name: "openwakeword".into(),
+            attribution: Attribution::default(),
+            installed: true,
+            description: None,
+            version: None,
+            models: vec![WakeModel {
+                name: "ok_nabu".into(),
+                attribution: Attribution::default(),
+                installed: true,
+                description: None,
+                version: None,
+                languages: vec!["en".into()],
+                phrase: Some("ok nabu".into()),
+            }],
+        }],
+        mic: vec![],
+        snd: vec![],
     };
 
     let event = original.clone().into_event();
@@ -630,6 +909,8 @@ fn test_run_pipeline_round_trip() {
         end_stage: PipelineStage::Tts,
         wake_word_name: Some("ok_nabu".into()),
         restart_on_end: true,
+        wake_word_names: Some(vec!["ok_nabu".into(), "hey_mycroft".into()]),
+        announce_text: None,
     };
 
     let event = original.clone().into_event();
@@ -645,6 +926,25 @@ fn test_run_pipeline_minimal() {
         end_stage: PipelineStage::Handle,
         wake_word_name: None,
         restart_on_end: false,
+        wake_word_names: None,
+        announce_text: None,
+    };
+
+    let event = original.clone().into_event();
+    let decoded = RunPipeline::from_event(event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_run_pipeline_with_announce_text() {
+    let original = RunPipeline {
+        start_stage: PipelineStage::Tts,
+        end_stage: PipelineStage::Tts,
+        wake_word_name: None,
+        restart_on_end: false,
+        wake_word_names: None,
+        announce_text: Some("Dinner is ready".into()),
     };
 
     let event = original.clone().into_event();
@@ -677,8 +977,11 @@ fn test_pipeline_stage_conversions() {
 fn test_timer_started_round_trip() {
     let original = TimerStarted {
         id: "timer-123".into(),
-        total_seconds: 60.5,
+        total_seconds: 60,
         name: Some("Kitchen Timer".into()),
+        start_hours: Some(0),
+        start_minutes: Some(1),
+        start_seconds: Some(0),
     };
 
     let event = original.clone().into_event();
@@ -691,8 +994,28 @@ fn test_timer_started_round_trip() {
 fn test_timer_started_no_name() {
     let original = TimerStarted {
         id: "timer-456".into(),
-        total_seconds: 120.0,
+        total_seconds: 120,
         name: None,
+        start_hours: None,
+        start_minutes: None,
+        start_seconds: None,
+    };
+
+    let event = original.clone().into_event();
+    let decoded = TimerStarted::from_event(event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_timer_started_with_start_fields() {
+    let original = TimerStarted {
+        id: "timer-hms".into(),
+        total_seconds: 3661,
+        name: Some("Long timer".into()),
+        start_hours: Some(1),
+        start_minutes: Some(1),
+        start_seconds: Some(1),
     };
 
     let event = original.clone().into_event();
@@ -706,7 +1029,7 @@ fn test_timer_updated_round_trip() {
     let original = TimerUpdated {
         id: "timer-789".into(),
         is_active: true,
-        total_seconds: 45.25,
+        total_seconds: 45,
     };
 
     let event = original.clone().into_event();
@@ -720,7 +1043,7 @@ fn test_timer_updated_inactive() {
     let original = TimerUpdated {
         id: "timer-inactive".into(),
         is_active: false,
-        total_seconds: 0.0,
+        total_seconds: 0,
     };
 
     let event = original.clone().into_event();
@@ -750,6 +1073,154 @@ fn test_timer_finished_round_trip() {
     let event = original.clone().into_event();
     let decoded = TimerFinished::from_event(event).unwrap();
 
+    assert_eq!(decoded, original);
+}
+
+// ============================================================================
+// Eventable Trait Round-Trip Tests - Handle Events
+// ============================================================================
+
+#[test]
+fn test_handled_round_trip() {
+    let original = Handled {
+        text: Some("Turning on the lights".into()),
+        context: Some(serde_json::json!({"intent": "TurnOn"})),
+    };
+    let event = original.clone().into_event();
+    let decoded = Handled::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_handled_minimal() {
+    let original = Handled {
+        text: None,
+        context: None,
+    };
+    let event = original.clone().into_event();
+    let decoded = Handled::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_not_handled_round_trip() {
+    let original = NotHandled {
+        text: Some("I don't understand".into()),
+        context: Some(serde_json::json!({"error": "no_match"})),
+    };
+    let event = original.clone().into_event();
+    let decoded = NotHandled::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_handled_start_round_trip() {
+    let original = HandledStart {
+        context: Some(serde_json::json!({"streaming": true})),
+    };
+    let event = original.clone().into_event();
+    let decoded = HandledStart::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_handled_chunk_round_trip() {
+    let original = HandledChunk {
+        text: "partial response".into(),
+    };
+    let event = original.clone().into_event();
+    let decoded = HandledChunk::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_handled_stop_round_trip() {
+    let original = HandledStop;
+    let event = original.into_event();
+    let decoded = HandledStop::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+// ============================================================================
+// Eventable Trait Round-Trip Tests - Intent Events
+// ============================================================================
+
+#[test]
+fn test_recognize_round_trip() {
+    let original = Recognize {
+        text: "turn on the lights".into(),
+        context: Some(serde_json::json!({"domain": "homeassistant"})),
+    };
+    let event = original.clone().into_event();
+    let decoded = Recognize::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_recognize_minimal() {
+    let original = Recognize {
+        text: "test".into(),
+        context: None,
+    };
+    let event = original.clone().into_event();
+    let decoded = Recognize::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_intent_round_trip() {
+    let original = Intent {
+        name: "TurnOn".into(),
+        entities: vec![
+            Entity {
+                name: "name".into(),
+                value: Some(serde_json::json!("lights")),
+            },
+            Entity {
+                name: "area".into(),
+                value: Some(serde_json::json!("kitchen")),
+            },
+        ],
+        text: Some("turn on the kitchen lights".into()),
+        context: Some(serde_json::json!({"confidence": 0.99})),
+    };
+    let event = original.clone().into_event();
+    let decoded = Intent::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_intent_minimal() {
+    let original = Intent {
+        name: "Unknown".into(),
+        entities: vec![],
+        text: None,
+        context: None,
+    };
+    let event = original.clone().into_event();
+    let decoded = Intent::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_not_recognized_round_trip() {
+    let original = NotRecognized {
+        text: Some("garbled input".into()),
+        context: Some(serde_json::json!({"reason": "low_confidence"})),
+    };
+    let event = original.clone().into_event();
+    let decoded = NotRecognized::from_event(event).unwrap();
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_not_recognized_minimal() {
+    let original = NotRecognized {
+        text: None,
+        context: None,
+    };
+    let event = original.clone().into_event();
+    let decoded = NotRecognized::from_event(event).unwrap();
     assert_eq!(decoded, original);
 }
 
@@ -835,21 +1306,47 @@ fn test_wrong_type_timer_events() {
     assert!(matches!(result, Err(ConversionError::WrongType { .. })));
 }
 
+#[test]
+fn test_wrong_type_handle_events() {
+    let event = Event::new("handled");
+    let result = NotHandled::from_event(event);
+    assert!(matches!(result, Err(ConversionError::WrongType { .. })));
+}
+
+#[test]
+fn test_wrong_type_intent_events() {
+    let event = Event::new("intent");
+    let result = Recognize::from_event(event);
+    assert!(matches!(result, Err(ConversionError::WrongType { .. })));
+}
+
 // ============================================================================
 // Event Type Constant Tests
 // ============================================================================
 
 #[test]
 fn test_event_type_constants() {
+    // Audio
     assert_eq!(AudioStart::EVENT_TYPE, "audio-start");
     assert_eq!(AudioChunk::EVENT_TYPE, "audio-chunk");
     assert_eq!(AudioStop::EVENT_TYPE, "audio-stop");
+    // Wake
     assert_eq!(Detect::EVENT_TYPE, "detect");
     assert_eq!(Detection::EVENT_TYPE, "detection");
     assert_eq!(NotDetected::EVENT_TYPE, "not-detected");
+    // ASR
     assert_eq!(Transcribe::EVENT_TYPE, "transcribe");
     assert_eq!(Transcript::EVENT_TYPE, "transcript");
+    assert_eq!(TranscriptStart::EVENT_TYPE, "transcript-start");
+    assert_eq!(TranscriptChunk::EVENT_TYPE, "transcript-chunk");
+    assert_eq!(TranscriptStop::EVENT_TYPE, "transcript-stop");
+    // TTS
     assert_eq!(Synthesize::EVENT_TYPE, "synthesize");
+    assert_eq!(SynthesizeStart::EVENT_TYPE, "synthesize-start");
+    assert_eq!(SynthesizeChunk::EVENT_TYPE, "synthesize-chunk");
+    assert_eq!(SynthesizeStop::EVENT_TYPE, "synthesize-stop");
+    assert_eq!(SynthesizeStopped::EVENT_TYPE, "synthesize-stopped");
+    // Satellite
     assert_eq!(RunSatellite::EVENT_TYPE, "run-satellite");
     assert_eq!(PauseSatellite::EVENT_TYPE, "pause-satellite");
     assert_eq!(StreamingStarted::EVENT_TYPE, "streaming-started");
@@ -857,13 +1354,26 @@ fn test_event_type_constants() {
     assert_eq!(SatelliteConnected::EVENT_TYPE, "satellite-connected");
     assert_eq!(SatelliteDisconnected::EVENT_TYPE, "satellite-disconnected");
     assert_eq!(Played::EVENT_TYPE, "played");
+    // Info
     assert_eq!(Describe::EVENT_TYPE, "describe");
     assert_eq!(Info::EVENT_TYPE, "info");
+    // Pipeline
     assert_eq!(RunPipeline::EVENT_TYPE, "run-pipeline");
+    // Timer
     assert_eq!(TimerStarted::EVENT_TYPE, "timer-started");
     assert_eq!(TimerUpdated::EVENT_TYPE, "timer-updated");
     assert_eq!(TimerCancelled::EVENT_TYPE, "timer-cancelled");
     assert_eq!(TimerFinished::EVENT_TYPE, "timer-finished");
+    // Handle
+    assert_eq!(Handled::EVENT_TYPE, "handled");
+    assert_eq!(NotHandled::EVENT_TYPE, "not-handled");
+    assert_eq!(HandledStart::EVENT_TYPE, "handled-start");
+    assert_eq!(HandledChunk::EVENT_TYPE, "handled-chunk");
+    assert_eq!(HandledStop::EVENT_TYPE, "handled-stop");
+    // Intent
+    assert_eq!(Recognize::EVENT_TYPE, "recognize");
+    assert_eq!(Intent::EVENT_TYPE, "intent");
+    assert_eq!(NotRecognized::EVENT_TYPE, "not-recognized");
 }
 
 // ============================================================================
@@ -911,9 +1421,25 @@ fn test_full_round_trip_info_wire_and_eventable() {
             area: Some("bedroom".into()),
             description: Some("wyoming-satellite-1".into()),
             version: Some("0.1.0".into()),
-            has_mic: true,
-            has_snd: false,
+            has_vad: Some(true),
+            active_wake_words: None,
+            max_active_wake_words: None,
+            supports_trigger: Some(false),
         }),
+        asr: vec![],
+        tts: vec![],
+        handle: vec![],
+        intent: vec![],
+        wake: vec![],
+        mic: vec![MicProgram {
+            name: "mic-1".into(),
+            attribution: Attribution::default(),
+            installed: true,
+            description: None,
+            version: None,
+            mic_format: AudioFormat::WYOMING_DEFAULT,
+        }],
+        snd: vec![],
     };
 
     let event = original_info.clone().into_event();
@@ -936,6 +1462,8 @@ fn test_full_round_trip_run_pipeline() {
         end_stage: PipelineStage::Handle,
         wake_word_name: Some("jarvis".into()),
         restart_on_end: true,
+        wake_word_names: None,
+        announce_text: None,
     };
 
     let event = original.clone().into_event();
@@ -947,6 +1475,47 @@ fn test_full_round_trip_run_pipeline() {
     let decoded_event = read_event(&mut reader).unwrap();
 
     let decoded = RunPipeline::from_event(decoded_event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_full_round_trip_handled() {
+    let original = Handled {
+        text: Some("Done".into()),
+        context: Some(serde_json::json!({"intent_name": "TurnOn"})),
+    };
+
+    let event = original.clone().into_event();
+    let mut buffer = Vec::new();
+    write_event(&mut buffer, &event).unwrap();
+
+    let mut reader = Cursor::new(&buffer);
+    let decoded_event = read_event(&mut reader).unwrap();
+    let decoded = Handled::from_event(decoded_event).unwrap();
+
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn test_full_round_trip_intent() {
+    let original = Intent {
+        name: "TurnOn".into(),
+        entities: vec![Entity {
+            name: "name".into(),
+            value: Some(serde_json::json!("lights")),
+        }],
+        text: Some("turn on the lights".into()),
+        context: None,
+    };
+
+    let event = original.clone().into_event();
+    let mut buffer = Vec::new();
+    write_event(&mut buffer, &event).unwrap();
+
+    let mut reader = Cursor::new(&buffer);
+    let decoded_event = read_event(&mut reader).unwrap();
+    let decoded = Intent::from_event(decoded_event).unwrap();
 
     assert_eq!(decoded, original);
 }
@@ -1054,6 +1623,7 @@ fn test_python_compat_synthesize_with_voice() {
     assert_eq!(voice.name, Some("piper".into()));
     assert_eq!(voice.language, None);
     assert_eq!(voice.speaker, None);
+    assert_eq!(synth.context, None);
 }
 
 #[test]
@@ -1075,11 +1645,14 @@ fn test_python_compat_run_pipeline() {
     assert_eq!(pipeline.start_stage, PipelineStage::Asr);
     assert_eq!(pipeline.end_stage, PipelineStage::Tts);
     assert!(pipeline.restart_on_end);
+    assert_eq!(pipeline.wake_word_names, None);
+    assert_eq!(pipeline.announce_text, None);
 }
 
 #[test]
 fn test_python_compat_info_with_satellite() {
-    let data_json = b"{\"satellite\": {\"name\": \"my-sat\", \"area\": \"kitchen\", \"has_mic\": true, \"has_snd\": false}}";
+    // Python sends satellite info with has_vad and supports_trigger
+    let data_json = b"{\"satellite\": {\"name\": \"my-sat\", \"area\": \"kitchen\", \"has_vad\": true, \"supports_trigger\": false}}";
     let data_len = data_json.len();
     let header = format!(
         "{{\"type\": \"info\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
@@ -1096,13 +1669,155 @@ fn test_python_compat_info_with_satellite() {
     let sat = info.satellite.unwrap();
     assert_eq!(sat.name, "my-sat");
     assert_eq!(sat.area, Some("kitchen".into()));
-    assert!(sat.has_mic);
-    assert!(!sat.has_snd);
+    assert_eq!(sat.has_vad, Some(true));
+    assert_eq!(sat.supports_trigger, Some(false));
     // Fields missing from wire JSON should get serde defaults
     assert_eq!(sat.attribution, Attribution::default());
     assert!(!sat.installed);
     assert_eq!(sat.description, None);
     assert_eq!(sat.version, None);
+    assert_eq!(sat.active_wake_words, None);
+    assert_eq!(sat.max_active_wake_words, None);
+    // Service lists should default to empty
+    assert!(info.asr.is_empty());
+    assert!(info.tts.is_empty());
+    assert!(info.mic.is_empty());
+    assert!(info.snd.is_empty());
+}
+
+#[test]
+fn test_python_compat_info_with_mic_snd() {
+    // Python sends info with mic and snd service lists
+    let data_json = br#"{"satellite": {"name": "sat-1"}, "mic": [{"name": "mic-prog", "mic_format": {"rate": 16000, "width": 2, "channels": 1}}], "snd": [{"name": "snd-prog", "snd_format": {"rate": 22050, "width": 2, "channels": 1}}]}"#;
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"info\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let info = Info::from_event(event).unwrap();
+
+    assert_eq!(info.mic.len(), 1);
+    assert_eq!(info.mic[0].name, "mic-prog");
+    assert_eq!(info.mic[0].mic_format.rate, 16000);
+
+    assert_eq!(info.snd.len(), 1);
+    assert_eq!(info.snd[0].name, "snd-prog");
+    assert_eq!(info.snd[0].snd_format.rate, 22050);
+}
+
+#[test]
+fn test_python_compat_handled() {
+    let data_json = b"{\"text\": \"OK, turning on the lights\", \"context\": {\"intent\": \"TurnOn\"}}";
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"handled\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let handled = Handled::from_event(event).unwrap();
+
+    assert_eq!(handled.text, Some("OK, turning on the lights".into()));
+    assert_eq!(handled.context, Some(serde_json::json!({"intent": "TurnOn"})));
+}
+
+#[test]
+fn test_python_compat_intent() {
+    let data_json = br#"{"name": "TurnOn", "entities": [{"name": "name", "value": "lights"}], "text": "turn on the lights"}"#;
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"intent\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let intent = Intent::from_event(event).unwrap();
+
+    assert_eq!(intent.name, "TurnOn");
+    assert_eq!(intent.entities.len(), 1);
+    assert_eq!(intent.entities[0].name, "name");
+    assert_eq!(intent.entities[0].value, Some(serde_json::json!("lights")));
+    assert_eq!(intent.text, Some("turn on the lights".into()));
+}
+
+#[test]
+fn test_python_compat_recognize() {
+    let data_json = b"{\"text\": \"turn on the lights\"}";
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"recognize\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let recognize = Recognize::from_event(event).unwrap();
+
+    assert_eq!(recognize.text, "turn on the lights");
+    assert_eq!(recognize.context, None);
+}
+
+#[test]
+fn test_python_compat_run_pipeline_with_announce() {
+    let data_json = br#"{"start_stage": "tts", "end_stage": "tts", "announce_text": "Dinner is ready", "wake_word_names": ["ok_nabu"]}"#;
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"run-pipeline\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let pipeline = RunPipeline::from_event(event).unwrap();
+
+    assert_eq!(pipeline.start_stage, PipelineStage::Tts);
+    assert_eq!(pipeline.end_stage, PipelineStage::Tts);
+    assert_eq!(pipeline.announce_text, Some("Dinner is ready".into()));
+    assert_eq!(pipeline.wake_word_names, Some(vec!["ok_nabu".into()]));
+}
+
+#[test]
+fn test_python_compat_timer_started() {
+    let data_json = br#"{"id": "timer-1", "total_seconds": 300, "name": "Cooking", "start_hours": 0, "start_minutes": 5, "start_seconds": 0}"#;
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"timer-started\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let timer = TimerStarted::from_event(event).unwrap();
+
+    assert_eq!(timer.id, "timer-1");
+    assert_eq!(timer.total_seconds, 300);
+    assert_eq!(timer.name, Some("Cooking".into()));
+    assert_eq!(timer.start_hours, Some(0));
+    assert_eq!(timer.start_minutes, Some(5));
+    assert_eq!(timer.start_seconds, Some(0));
 }
 
 // ============================================================================
@@ -1160,6 +1875,7 @@ fn test_synthesize_into_event_voice_nested_object() {
             language: Some("en-US".into()),
             speaker: Some("p270".into()),
         }),
+        context: None,
     };
 
     let event = synth.into_event();
@@ -1202,6 +1918,8 @@ fn test_run_pipeline_into_event_structure() {
         end_stage: PipelineStage::Tts,
         wake_word_name: Some("hey_jarvis".into()),
         restart_on_end: true,
+        wake_word_names: None,
+        announce_text: None,
     };
 
     let event = pipeline.into_event();
@@ -1211,6 +1929,8 @@ fn test_run_pipeline_into_event_structure() {
     assert_eq!(event.data.get("end_stage").and_then(|v| v.as_str()), Some("tts"));
     assert_eq!(event.data.get("wake_word_name").and_then(|v| v.as_str()), Some("hey_jarvis"));
     assert_eq!(event.data.get("restart_on_end").and_then(|v| v.as_bool()), Some(true));
+    assert!(event.data.get("wake_word_names").is_none());
+    assert!(event.data.get("announce_text").is_none());
 }
 
 // ============================================================================
@@ -1450,4 +2170,30 @@ fn test_rust_output_parseable_by_python() {
     assert!(data["rate"].is_number());
     assert_eq!(data["rate"].as_u64().unwrap(), 16000);
     assert_eq!(buffer.len(), newline_pos + 1 + data_length);
+}
+
+// ============================================================================
+// Forward compatibility: Info with unknown fields deserializes fine
+// ============================================================================
+
+#[test]
+fn test_info_forward_compat_unknown_satellite_fields() {
+    // Future Python might send extra satellite fields; serde(default) should handle it
+    let data_json = br#"{"satellite": {"name": "sat", "has_vad": true, "future_new_field": "ignored"}}"#;
+    let data_len = data_json.len();
+    let header = format!(
+        "{{\"type\": \"info\", \"version\": \"1.5.2\", \"data_length\": {}}}\n",
+        data_len
+    );
+    let mut wire: Vec<u8> = Vec::new();
+    wire.extend_from_slice(header.as_bytes());
+    wire.extend_from_slice(data_json);
+
+    let mut reader = Cursor::new(&wire);
+    let event = read_event(&mut reader).unwrap();
+    let info = Info::from_event(event).unwrap();
+
+    let sat = info.satellite.unwrap();
+    assert_eq!(sat.name, "sat");
+    assert_eq!(sat.has_vad, Some(true));
 }

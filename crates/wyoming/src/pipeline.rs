@@ -23,6 +23,7 @@ impl PipelineStage {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "wake" => Some(Self::Wake),
@@ -42,6 +43,8 @@ pub struct RunPipeline {
     pub end_stage: PipelineStage,
     pub wake_word_name: Option<String>,
     pub restart_on_end: bool,
+    pub wake_word_names: Option<Vec<String>>,
+    pub announce_text: Option<String>,
 }
 
 impl Eventable for RunPipeline {
@@ -62,6 +65,15 @@ impl Eventable for RunPipeline {
         }
         if self.restart_on_end {
             data.insert("restart_on_end".into(), Value::Bool(true));
+        }
+        if let Some(names) = self.wake_word_names {
+            data.insert(
+                "wake_word_names".into(),
+                Value::Array(names.into_iter().map(Value::String).collect()),
+            );
+        }
+        if let Some(text) = self.announce_text {
+            data.insert("announce_text".into(), Value::String(text));
         }
         Event::new(Self::EVENT_TYPE).with_data(data)
     }
@@ -94,12 +106,25 @@ impl Eventable for RunPipeline {
             .get("restart_on_end")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let wake_word_names = event.data.get("wake_word_names").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+        });
+        let announce_text = event
+            .data
+            .get("announce_text")
+            .and_then(|v| v.as_str().map(String::from));
 
         Ok(Self {
             start_stage,
             end_stage,
             wake_word_name,
             restart_on_end,
+            wake_word_names,
+            announce_text,
         })
     }
 }

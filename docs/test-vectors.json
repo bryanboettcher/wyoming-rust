@@ -1,0 +1,497 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Test vectors for Wyoming protocol compatibility testing. Each entry contains the event description, expected wire format bytes (as hex), and parsed structure.",
+  "vectors": [
+    {
+      "name": "minimal_event_no_data",
+      "description": "Simplest valid event with only type and version",
+      "event": {
+        "type": "test-event"
+      },
+      "wire_hex_parts": {
+        "header": "7b2274797065223a22746573742d6576656e74222c2276657273696f6e223a22312e352e32227d0a",
+        "data": "",
+        "payload": ""
+      },
+      "wire_utf8": "{\"type\":\"test-event\",\"version\":\"1.5.2\"}\n"
+    },
+    {
+      "name": "event_with_data",
+      "description": "Event with JSON data section but no payload",
+      "event": {
+        "type": "test-event",
+        "data": {
+          "test": "data"
+        }
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"test-event\",\"version\":\"1.5.2\",\"data_length\":16}\n",
+        "data": "{\"test\":\"data\"}",
+        "payload": ""
+      },
+      "notes": "data_length is byte length of UTF-8 encoded data JSON"
+    },
+    {
+      "name": "event_with_data_and_payload",
+      "description": "Complete event with data and binary payload",
+      "event": {
+        "type": "test-event",
+        "data": {
+          "test": "data"
+        },
+        "payload_note": "bytes: test\\npayload (12 bytes)"
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"test-event\",\"version\":\"1.5.2\",\"data_length\":16,\"payload_length\":12}\n",
+        "data": "{\"test\":\"data\"}",
+        "payload": "test\npayload"
+      }
+    },
+    {
+      "name": "audio_start",
+      "description": "AudioStart event for 16kHz mono 16-bit audio",
+      "event": {
+        "type": "audio-start",
+        "data": {
+          "rate": 16000,
+          "width": 2,
+          "channels": 1
+        }
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"audio-start\",\"version\":\"1.5.2\",\"data_length\":38}\n",
+        "data": "{\"rate\":16000,\"width\":2,\"channels\":1}",
+        "payload": ""
+      },
+      "notes": "timestamp field omitted when None"
+    },
+    {
+      "name": "audio_start_with_timestamp",
+      "description": "AudioStart with timestamp",
+      "event": {
+        "type": "audio-start",
+        "data": {
+          "rate": 16000,
+          "width": 2,
+          "channels": 1,
+          "timestamp": 1234567890
+        }
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"audio-start\",\"version\":\"1.5.2\",\"data_length\":61}\n",
+        "data": "{\"rate\":16000,\"width\":2,\"channels\":1,\"timestamp\":1234567890}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "audio_chunk_30ms",
+      "description": "AudioChunk with 30ms of 16kHz mono 16-bit audio (960 bytes)",
+      "event": {
+        "type": "audio-chunk",
+        "data": {
+          "rate": 16000,
+          "width": 2,
+          "channels": 1
+        },
+        "payload_length": 960
+      },
+      "calculation": "30ms * 16000Hz / 1000ms * 2 bytes/sample * 1 channel = 960 bytes",
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"audio-chunk\",\"version\":\"1.5.2\",\"data_length\":38,\"payload_length\":960}\n",
+        "data": "{\"rate\":16000,\"width\":2,\"channels\":1}",
+        "payload": "<960 bytes of PCM audio data>"
+      },
+      "notes": "Test data uses bytes([255] * 960) - all 0xFF bytes"
+    },
+    {
+      "name": "audio_stop",
+      "description": "AudioStop event",
+      "event": {
+        "type": "audio-stop",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"audio-stop\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "transcript",
+      "description": "ASR Transcript result",
+      "event": {
+        "type": "transcript",
+        "data": {
+          "text": "test"
+        }
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"transcript\",\"version\":\"1.5.2\",\"data_length\":16}\n",
+        "data": "{\"text\":\"test\"}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "transcript_full",
+      "description": "Transcript with language and context",
+      "event": {
+        "type": "transcript",
+        "data": {
+          "text": "turn on the lights",
+          "language": "en-US",
+          "context": {
+            "conversation_id": "abc123"
+          }
+        }
+      },
+      "notes": "Language and context are optional fields"
+    },
+    {
+      "name": "transcribe",
+      "description": "ASR Transcribe request",
+      "event": {
+        "type": "transcribe",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"transcribe\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      },
+      "notes": "All fields (name, language, context) are optional"
+    },
+    {
+      "name": "detection",
+      "description": "Wake word detection event",
+      "event": {
+        "type": "detection",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"detection\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "detection_full",
+      "description": "Detection with all optional fields",
+      "event": {
+        "type": "detection",
+        "data": {
+          "name": "ok_nabu",
+          "timestamp": 1234567890,
+          "speaker": "user1",
+          "context": {
+            "confidence": 0.95
+          }
+        }
+      }
+    },
+    {
+      "name": "detect",
+      "description": "Wake word detect request",
+      "event": {
+        "type": "detect",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"detect\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "detect_with_names",
+      "description": "Detect with specific wake word models",
+      "event": {
+        "type": "detect",
+        "data": {
+          "names": [
+            "ok_nabu",
+            "hey_jarvis"
+          ]
+        }
+      }
+    },
+    {
+      "name": "not_detected",
+      "description": "Wake word not detected",
+      "event": {
+        "type": "not-detected",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"not-detected\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "synthesize",
+      "description": "TTS synthesize request",
+      "event": {
+        "type": "synthesize",
+        "data": {
+          "text": "test"
+        }
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"synthesize\",\"version\":\"1.5.2\",\"data_length\":16}\n",
+        "data": "{\"text\":\"test\"}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "synthesize_with_voice",
+      "description": "Synthesize with voice specification",
+      "event": {
+        "type": "synthesize",
+        "data": {
+          "text": "Hello, world!",
+          "voice": {
+            "name": "en_US-lessac-medium",
+            "language": "en-US"
+          }
+        }
+      },
+      "notes": "voice.speaker field omitted when None"
+    },
+    {
+      "name": "run_satellite",
+      "description": "Server ready to run pipeline",
+      "event": {
+        "type": "run-satellite",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"run-satellite\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "pause_satellite",
+      "description": "Server not ready",
+      "event": {
+        "type": "pause-satellite",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"pause-satellite\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "streaming_started",
+      "description": "Satellite started audio streaming",
+      "event": {
+        "type": "streaming-started",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"streaming-started\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "streaming_stopped",
+      "description": "Satellite stopped audio streaming",
+      "event": {
+        "type": "streaming-stopped",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"streaming-stopped\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    },
+    {
+      "name": "run_pipeline",
+      "description": "Request pipeline execution",
+      "event": {
+        "type": "run-pipeline",
+        "data": {
+          "start_stage": "asr",
+          "end_stage": "tts"
+        }
+      },
+      "notes": "Typical wake-word-triggered voice assistant flow"
+    },
+    {
+      "name": "describe",
+      "description": "Request service capabilities",
+      "event": {
+        "type": "describe",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"describe\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      }
+    }
+  ],
+  "edge_cases": [
+    {
+      "name": "inline_data_merge",
+      "description": "Header inline data merged with data section",
+      "header": {
+        "type": "test-event",
+        "version": "1.5.2",
+        "data_length": 22,
+        "data": {
+          "test": "will be overwritten",
+          "test2": "will not"
+        }
+      },
+      "data_section": {
+        "test": "data"
+      },
+      "expected_merged_data": {
+        "test": "data",
+        "test2": "will not"
+      },
+      "notes": "Data section overwrites keys while preserving unspecified fields from header"
+    },
+    {
+      "name": "payload_with_newlines",
+      "description": "Binary payload containing newline characters",
+      "event": {
+        "type": "test-event",
+        "data": {},
+        "payload_bytes_utf8": "test\npayload"
+      },
+      "notes": "Newlines in payload are preserved as literal \\n bytes, not line breaks"
+    },
+    {
+      "name": "unicode_in_data",
+      "description": "Unicode characters in data section",
+      "event": {
+        "type": "test-event",
+        "data": {
+          "text": "Hello 世界"
+        }
+      },
+      "notes": "Must use ensure_ascii=False and UTF-8 encoding. Data length is UTF-8 byte count, not character count"
+    },
+    {
+      "name": "empty_data_object",
+      "description": "Data section is empty JSON object",
+      "event": {
+        "type": "test-event",
+        "data": {}
+      },
+      "wire_utf8_parts": {
+        "header": "{\"type\":\"test-event\",\"version\":\"1.5.2\",\"data_length\":2}\n",
+        "data": "{}",
+        "payload": ""
+      },
+      "notes": "data_length is 2 (byte length of '{}')"
+    }
+  ],
+  "timing_examples": [
+    {
+      "description": "30ms audio chunk at 16kHz mono 16-bit",
+      "sample_rate": 16000,
+      "width_bytes": 2,
+      "channels": 1,
+      "duration_ms": 30,
+      "calculated_bytes": 960,
+      "formula": "duration_ms * sample_rate / 1000 * width_bytes * channels"
+    },
+    {
+      "description": "20ms audio chunk at 16kHz mono 16-bit",
+      "sample_rate": 16000,
+      "width_bytes": 2,
+      "channels": 1,
+      "duration_ms": 20,
+      "calculated_bytes": 640,
+      "formula": "20 * 16000 / 1000 * 2 * 1 = 640"
+    },
+    {
+      "description": "10ms audio chunk at 48kHz stereo 16-bit",
+      "sample_rate": 48000,
+      "width_bytes": 2,
+      "channels": 2,
+      "duration_ms": 10,
+      "calculated_bytes": 1920,
+      "formula": "10 * 48000 / 1000 * 2 * 2 = 1920"
+    }
+  ],
+  "integration_test_sequence": {
+    "description": "Complete wake-word-triggered voice assistant interaction",
+    "messages": [
+      {
+        "direction": "server_to_satellite",
+        "event_type": "run-satellite",
+        "description": "Server ready, satellite starts listening"
+      },
+      {
+        "direction": "satellite_to_server",
+        "event_type": "detection",
+        "description": "Wake word detected"
+      },
+      {
+        "direction": "satellite_to_server",
+        "event_type": "run-pipeline",
+        "data": {
+          "start_stage": "asr",
+          "end_stage": "tts"
+        },
+        "description": "Request full voice assistant pipeline"
+      },
+      {
+        "direction": "satellite_to_server",
+        "event_type": "streaming-started",
+        "description": "Audio streaming begins (implicit)"
+      },
+      {
+        "direction": "satellite_to_server",
+        "event_type": "audio-chunk",
+        "description": "Audio chunks sent continuously (multiple)",
+        "repeat": "until VAD detects end of speech"
+      },
+      {
+        "direction": "server_to_satellite",
+        "event_type": "transcript",
+        "data": {
+          "text": "turn on the lights"
+        },
+        "description": "ASR transcription result"
+      },
+      {
+        "direction": "satellite_to_server",
+        "event_type": "streaming-stopped",
+        "description": "Audio streaming complete"
+      },
+      {
+        "direction": "server_to_satellite",
+        "event_type": "synthesize",
+        "data": {
+          "text": "Turning on the lights"
+        },
+        "description": "TTS response"
+      },
+      {
+        "direction": "server_to_satellite",
+        "event_type": "audio-start",
+        "description": "TTS audio begins"
+      },
+      {
+        "direction": "server_to_satellite",
+        "event_type": "audio-chunk",
+        "description": "TTS audio chunks (multiple)"
+      },
+      {
+        "direction": "server_to_satellite",
+        "event_type": "audio-stop",
+        "description": "TTS audio complete"
+      }
+    ],
+    "notes": "Satellite plays TTS audio and returns to listening state"
+  }
+}

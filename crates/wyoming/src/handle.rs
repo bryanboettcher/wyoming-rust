@@ -2,24 +2,20 @@ use serde_json::{Map, Value};
 
 use crate::event::{ConversionError, Event, Eventable};
 
-/// Request to transcribe audio.
+/// Intent was handled. Event type: "handled"
 #[derive(Debug, Clone, PartialEq)]
-pub struct Transcribe {
-    pub name: Option<String>,
-    pub language: Option<String>,
+pub struct Handled {
+    pub text: Option<String>,
     pub context: Option<Value>,
 }
 
-impl Eventable for Transcribe {
-    const EVENT_TYPE: &'static str = "transcribe";
+impl Eventable for Handled {
+    const EVENT_TYPE: &'static str = "handled";
 
     fn into_event(self) -> Event {
         let mut data = Map::new();
-        if let Some(name) = self.name {
-            data.insert("name".into(), Value::String(name));
-        }
-        if let Some(language) = self.language {
-            data.insert("language".into(), Value::String(language));
+        if let Some(text) = self.text {
+            data.insert("text".into(), Value::String(text));
         }
         if let Some(context) = self.context {
             data.insert("context".into(), context);
@@ -35,35 +31,29 @@ impl Eventable for Transcribe {
             });
         }
         Ok(Self {
-            name: event
+            text: event
                 .data
-                .get("name")
-                .and_then(|v| v.as_str().map(String::from)),
-            language: event
-                .data
-                .get("language")
+                .get("text")
                 .and_then(|v| v.as_str().map(String::from)),
             context: event.data.get("context").cloned(),
         })
     }
 }
 
-/// Speech-to-text result.
+/// Intent was not handled. Event type: "not-handled"
 #[derive(Debug, Clone, PartialEq)]
-pub struct Transcript {
-    pub text: String,
-    pub language: Option<String>,
+pub struct NotHandled {
+    pub text: Option<String>,
     pub context: Option<Value>,
 }
 
-impl Eventable for Transcript {
-    const EVENT_TYPE: &'static str = "transcript";
+impl Eventable for NotHandled {
+    const EVENT_TYPE: &'static str = "not-handled";
 
     fn into_event(self) -> Event {
         let mut data = Map::new();
-        data.insert("text".into(), Value::String(self.text));
-        if let Some(language) = self.language {
-            data.insert("language".into(), Value::String(language));
+        if let Some(text) = self.text {
+            data.insert("text".into(), Value::String(text));
         }
         if let Some(context) = self.context {
             data.insert("context".into(), context);
@@ -78,44 +68,29 @@ impl Eventable for Transcript {
                 actual: event.event_type,
             });
         }
-        let text = event
-            .data
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ConversionError::MissingField("text".into()))?
-            .to_string();
         Ok(Self {
-            text,
-            language: event
+            text: event
                 .data
-                .get("language")
+                .get("text")
                 .and_then(|v| v.as_str().map(String::from)),
             context: event.data.get("context").cloned(),
         })
     }
 }
 
-// ============================================================================
-// Streaming Transcript types
-// ============================================================================
-
-/// Start streaming transcription. Event type: "transcript-start"
+/// Start streaming handled response. Event type: "handled-start"
 #[derive(Debug, Clone, PartialEq)]
-pub struct TranscriptStart {
+pub struct HandledStart {
     pub context: Option<Value>,
-    pub language: Option<String>,
 }
 
-impl Eventable for TranscriptStart {
-    const EVENT_TYPE: &'static str = "transcript-start";
+impl Eventable for HandledStart {
+    const EVENT_TYPE: &'static str = "handled-start";
 
     fn into_event(self) -> Event {
         let mut data = Map::new();
         if let Some(context) = self.context {
             data.insert("context".into(), context);
-        }
-        if let Some(language) = self.language {
-            data.insert("language".into(), Value::String(language));
         }
         Event::new(Self::EVENT_TYPE).with_data(data)
     }
@@ -129,22 +104,18 @@ impl Eventable for TranscriptStart {
         }
         Ok(Self {
             context: event.data.get("context").cloned(),
-            language: event
-                .data
-                .get("language")
-                .and_then(|v| v.as_str().map(String::from)),
         })
     }
 }
 
-/// A chunk of transcript text from streaming ASR. Event type: "transcript-chunk"
+/// A chunk of handled response text. Event type: "handled-chunk"
 #[derive(Debug, Clone, PartialEq)]
-pub struct TranscriptChunk {
+pub struct HandledChunk {
     pub text: String,
 }
 
-impl Eventable for TranscriptChunk {
-    const EVENT_TYPE: &'static str = "transcript-chunk";
+impl Eventable for HandledChunk {
+    const EVENT_TYPE: &'static str = "handled-chunk";
 
     fn into_event(self) -> Event {
         let mut data = Map::new();
@@ -169,12 +140,12 @@ impl Eventable for TranscriptChunk {
     }
 }
 
-/// Stop streaming transcription. Event type: "transcript-stop"
+/// Stop streaming handled response. Event type: "handled-stop"
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TranscriptStop;
+pub struct HandledStop;
 
-impl Eventable for TranscriptStop {
-    const EVENT_TYPE: &'static str = "transcript-stop";
+impl Eventable for HandledStop {
+    const EVENT_TYPE: &'static str = "handled-stop";
 
     fn into_event(self) -> Event {
         Event::new(Self::EVENT_TYPE)

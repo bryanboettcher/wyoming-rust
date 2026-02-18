@@ -252,9 +252,7 @@ RUN mkdir -p /runtime-libs && \
 # For ARMv6 builds, the platform is linux/arm/v7 (Debian's armhf). The arm/v7
 # system libraries would normally SIGILL on ARMv6 hardware, but the COPY of
 # /runtime-libs/ below overlays ARMv6-safe libraries from the tttapa sysroot.
-# DEBIAN_PLATFORM allows CI to override the base image platform if needed.
-ARG DEBIAN_PLATFORM=${TARGETPLATFORM}
-FROM --platform=${DEBIAN_PLATFORM} debian:bookworm-slim
+FROM debian:bookworm-slim
 
 ARG RUST_TARGET=x86_64-unknown-linux-gnu
 

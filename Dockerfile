@@ -229,16 +229,19 @@ RUN mkdir -p /output && \
 # libasound into Debian's armhf multiarch paths. These will overlay the arm/v7
 # libraries in the runtime image, replacing them with ARMv6-safe equivalents.
 # Always create /runtime-libs so the COPY in the runtime stage succeeds for all targets.
+#
+# IMPORTANT: Debian bookworm uses usrmerge — /lib is a symlink to /usr/lib.
+# BuildKit COPY cannot write into symlink targets, so all libs must go under
+# /usr/lib/arm-linux-gnueabihf/ (the real directory), not /lib/arm-linux-gnueabihf/.
 RUN mkdir -p /runtime-libs && \
     if [ -n "$USE_ARMV6_TOOLCHAIN" ]; then \
         SYSROOT=/opt/x-tools/armv6-rpi-linux-gnueabihf/armv6-rpi-linux-gnueabihf/sysroot \
-        && mkdir -p /runtime-libs/lib/arm-linux-gnueabihf \
         && mkdir -p /runtime-libs/usr/lib/arm-linux-gnueabihf \
-        && cp -a $SYSROOT/lib/*.so* /runtime-libs/lib/arm-linux-gnueabihf/ \
+        && cp -a $SYSROOT/lib/*.so* /runtime-libs/usr/lib/arm-linux-gnueabihf/ \
         && cp -a $SYSROOT/usr/lib/libasound.so* /runtime-libs/usr/lib/arm-linux-gnueabihf/ \
         && LIBGCC=$(find /opt/x-tools/armv6-rpi-linux-gnueabihf -name 'libgcc_s.so.1' | head -1) \
         && if [ -n "$LIBGCC" ]; then \
-            cp -a "$LIBGCC" /runtime-libs/lib/arm-linux-gnueabihf/; \
+            cp -a "$LIBGCC" /runtime-libs/usr/lib/arm-linux-gnueabihf/; \
         fi; \
     fi
 

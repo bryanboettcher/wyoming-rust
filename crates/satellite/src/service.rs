@@ -7,7 +7,7 @@ use wyoming::info::{Attribution, MicProgram, SatelliteInfo, SndProgram};
 use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
-use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError};
+use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError, HandshakeResult};
 use crate::feedback::{self, Feedback, FanoutFeedback};
 use crate::hardware::{AudioError, AudioSink, AudioSource, Vad};
 use crate::state::{Action, SatelliteInput, SatelliteState};
@@ -122,10 +122,15 @@ impl SatelliteService {
         })
     }
 
-    /// Block until a connection is established and the describe/info + run-satellite
-    /// handshake completes. On success, the service is ready for a session.
+    /// Block until a connection is established and the handshake completes.
+    ///
+    /// Handles two HA connection patterns:
+    /// 1. HA sends `describe` → we reply with `info` → wait for `run-satellite`
+    /// 2. HA sends `run-satellite` directly → skip to main loop
+    ///
+    /// On success, the service is ready for a session.
     pub fn establish_connection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let conn = match &self.mode {
+        let (conn, handshake) = match &self.mode {
             ConnectionMode::Listen(listener) => {
                 log::info!("Waiting for client connection...");
                 let (stream, addr) = listener.accept()?;
@@ -137,7 +142,11 @@ impl SatelliteService {
             }
         };
         self.conn = Some(conn);
-        self.conn.as_mut().unwrap().wait_for_run()?;
+
+        if handshake == HandshakeResult::NeedRunSatellite {
+            self.conn.as_mut().unwrap().wait_for_run()?;
+        }
+
         Ok(())
     }
 

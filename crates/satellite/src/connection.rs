@@ -24,6 +24,23 @@ pub enum ConnectionError {
 
 }
 
+/// Result of the initial handshake when a connection is established.
+///
+/// Home Assistant uses two connection patterns:
+/// 1. Discovery: sends `describe`, expects `info` reply, then disconnects and reconnects.
+/// 2. Operational: sends `run-satellite` directly (already knows the satellite from discovery).
+///
+/// The caller uses this to decide whether to call `wait_for_run()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeResult {
+    /// First event was `describe`. We replied with `info`.
+    /// Caller should call `wait_for_run()` to wait for the operational command.
+    NeedRunSatellite,
+    /// First event was `run-satellite`. Caller should skip `wait_for_run()`
+    /// and enter the main loop immediately.
+    ReadyToRun,
+}
+
 /// Manages the TCP connection to the Home Assistant Wyoming server.
 ///
 /// Holds separate reader/writer handles to the same TCP socket.
@@ -34,17 +51,20 @@ pub struct Connection {
 }
 
 impl Connection {
-    /// Connect to the server and perform the describe/info handshake.
+    /// Connect to the server and perform the initial handshake.
     ///
     /// 1. TCP connect
-    /// 2. Wait for `describe` from server
-    /// 3. Reply with `info` containing our satellite metadata
+    /// 2. Read first event: `describe` or `run-satellite`
+    /// 3. If `describe`: reply with `info`
+    ///
+    /// Returns the connection and a [`HandshakeResult`] indicating whether
+    /// the caller still needs to wait for `run-satellite`.
     pub fn connect(
         config: &ServerConfig,
         sat_info: &SatelliteInfo,
         mic_programs: &[MicProgram],
         snd_programs: &[SndProgram],
-    ) -> Result<Self, ConnectionError> {
+    ) -> Result<(Self, HandshakeResult), ConnectionError> {
         let addr = format!("{}:{}", config.host, config.port);
         log::info!("Connecting to {}", addr);
 
@@ -55,64 +75,75 @@ impl Connection {
         let writer = BufWriter::new(stream);
         let mut conn = Self { reader, writer };
 
-        // Handshake: server sends `describe`, we reply with `info`
-        conn.handle_describe(sat_info, mic_programs, snd_programs)?;
+        let result = conn.handle_handshake(sat_info, mic_programs, snd_programs)?;
 
-        Ok(conn)
+        Ok((conn, result))
     }
 
-    /// Wrap a pre-accepted TcpStream (listen mode) and handle the describe/info handshake.
+    /// Wrap a pre-accepted TcpStream (listen mode) and handle the initial handshake.
     ///
     /// In listen mode, the satellite is the TCP server. HA connects to us and
-    /// sends `describe`; we reply with `info` — same handshake as connect mode.
+    /// sends either `describe` (discovery) or `run-satellite` (operational).
+    ///
+    /// Returns the connection and a [`HandshakeResult`] indicating whether
+    /// the caller still needs to wait for `run-satellite`.
     pub fn from_stream(
         stream: TcpStream,
         sat_info: &SatelliteInfo,
         mic_programs: &[MicProgram],
         snd_programs: &[SndProgram],
-    ) -> Result<Self, ConnectionError> {
+    ) -> Result<(Self, HandshakeResult), ConnectionError> {
         stream.set_nodelay(true)?;
 
         let reader = BufReader::new(stream.try_clone()?);
         let writer = BufWriter::new(stream);
         let mut conn = Self { reader, writer };
 
-        // Same handshake: HA sends `describe`, we reply with `info`
-        conn.handle_describe(sat_info, mic_programs, snd_programs)?;
+        let result = conn.handle_handshake(sat_info, mic_programs, snd_programs)?;
 
-        Ok(conn)
+        Ok((conn, result))
     }
 
-    /// Handle the describe/info handshake.
-    fn handle_describe(
+    /// Handle the initial handshake event.
+    ///
+    /// Reads the first event on the connection and dispatches:
+    /// - `describe` → reply with `info`, return `NeedRunSatellite`
+    /// - `run-satellite` → return `ReadyToRun` (skip describe exchange)
+    /// - anything else → return error
+    fn handle_handshake(
         &mut self,
         sat_info: &SatelliteInfo,
         mic_programs: &[MicProgram],
         snd_programs: &[SndProgram],
-    ) -> Result<(), ConnectionError> {
+    ) -> Result<HandshakeResult, ConnectionError> {
         let event = event::read_event(&mut self.reader)?;
 
-        if event.event_type != Describe::EVENT_TYPE {
-            return Err(ConnectionError::UnexpectedEvent {
-                expected: Describe::EVENT_TYPE.into(),
-                actual: event.event_type,
-            });
+        if event.event_type == RunSatellite::EVENT_TYPE {
+            log::info!("Received run-satellite as first event, skipping describe exchange");
+            return Ok(HandshakeResult::ReadyToRun);
         }
 
-        log::debug!("Received describe, sending info");
+        if event.event_type == Describe::EVENT_TYPE {
+            log::debug!("Received describe, sending info");
 
-        let info = Info {
-            satellite: Some(sat_info.clone()),
-            asr: vec![],
-            tts: vec![],
-            handle: vec![],
-            intent: vec![],
-            wake: vec![],
-            mic: mic_programs.to_vec(),
-            snd: snd_programs.to_vec(),
-        };
-        self.send(info)?;
-        Ok(())
+            let info = Info {
+                satellite: Some(sat_info.clone()),
+                asr: vec![],
+                tts: vec![],
+                handle: vec![],
+                intent: vec![],
+                wake: vec![],
+                mic: mic_programs.to_vec(),
+                snd: snd_programs.to_vec(),
+            };
+            self.send(info)?;
+            return Ok(HandshakeResult::NeedRunSatellite);
+        }
+
+        Err(ConnectionError::UnexpectedEvent {
+            expected: "describe or run-satellite".into(),
+            actual: event.event_type,
+        })
     }
 
     /// Block until the server sends `run-satellite`.
@@ -194,7 +225,7 @@ pub fn connect_with_retry(
     mic_programs: &[MicProgram],
     snd_programs: &[SndProgram],
     max_attempts: Option<u32>,
-) -> Result<Connection, ConnectionError> {
+) -> Result<(Connection, HandshakeResult), ConnectionError> {
     let mut delay = Duration::from_secs(1);
     let max_delay = Duration::from_secs(30);
     let mut attempt = 0u32;
@@ -202,7 +233,7 @@ pub fn connect_with_retry(
     loop {
         attempt += 1;
         match Connection::connect(config, sat_info, mic_programs, snd_programs) {
-            Ok(conn) => return Ok(conn),
+            Ok(result) => return Ok(result),
             Err(e) => {
                 if let Some(max) = max_attempts {
                     if attempt >= max {

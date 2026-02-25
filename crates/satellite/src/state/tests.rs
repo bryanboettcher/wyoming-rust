@@ -38,7 +38,9 @@ fn idle_voice_detected_starts_streaming() {
         vec![
             Action::SetFeedback(FeedbackState::Listening),
             Action::StartCapture,
+            Action::SendRunPipeline,
             Action::SendAudioStart,
+            Action::FlushPreRollBuffer,
             Action::SendStreamingStarted,
         ],
     );
@@ -520,7 +522,9 @@ fn full_happy_path_conversation() {
         vec![
             Action::SetFeedback(FeedbackState::Listening),
             Action::StartCapture,
+            Action::SendRunPipeline,
             Action::SendAudioStart,
+            Action::FlushPreRollBuffer,
             Action::SendStreamingStarted,
         ]
     );
@@ -721,7 +725,7 @@ fn recovery_after_disconnection_during_streaming() {
     assert_eq!(new_state, SatelliteState::Streaming);
     assert_eq!(
         actions,
-        vec![Action::SetFeedback(FeedbackState::Listening), Action::StartCapture, Action::SendAudioStart, Action::SendStreamingStarted]
+        vec![Action::SetFeedback(FeedbackState::Listening), Action::StartCapture, Action::SendRunPipeline, Action::SendAudioStart, Action::FlushPreRollBuffer, Action::SendStreamingStarted]
     );
 }
 
@@ -763,6 +767,20 @@ fn action_ordering_streaming_to_idle_on_silence() {
 
     assert!(stop_capture_pos < send_audio_stop_pos);
     assert!(send_audio_stop_pos < send_streaming_stopped_pos);
+}
+
+#[test]
+fn action_ordering_idle_to_streaming_run_pipeline_before_audio() {
+    let (_, actions) = transition(&SatelliteState::Idle, &SatelliteInput::VoiceDetected);
+
+    let run_pipeline_pos = actions.iter().position(|a| a == &Action::SendRunPipeline).unwrap();
+    let audio_start_pos = actions.iter().position(|a| a == &Action::SendAudioStart).unwrap();
+    let flush_pos = actions.iter().position(|a| a == &Action::FlushPreRollBuffer).unwrap();
+    let streaming_started_pos = actions.iter().position(|a| a == &Action::SendStreamingStarted).unwrap();
+
+    assert!(run_pipeline_pos < audio_start_pos, "run-pipeline must precede audio-start");
+    assert!(audio_start_pos < flush_pos, "audio-start must precede flush");
+    assert!(flush_pos < streaming_started_pos, "flush must precede streaming-started");
 }
 
 #[test]

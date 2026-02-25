@@ -124,6 +124,8 @@ pub enum VadConfig {
     AlwaysOn {
         #[serde(default = "default_silence_timeout_ms")]
         silence_timeout_ms: u64,
+        #[serde(default = "default_buffer_seconds")]
+        buffer_seconds: f64,
     },
 
     #[serde(rename = "gpio")]
@@ -138,6 +140,8 @@ pub enum VadConfig {
         threshold: u16,
         #[serde(default = "default_silence_timeout_ms")]
         silence_timeout_ms: u64,
+        #[serde(default = "default_buffer_seconds")]
+        buffer_seconds: f64,
     },
 }
 
@@ -145,6 +149,7 @@ impl Default for VadConfig {
     fn default() -> Self {
         VadConfig::AlwaysOn {
             silence_timeout_ms: default_silence_timeout_ms(),
+            buffer_seconds: default_buffer_seconds(),
         }
     }
 }
@@ -153,15 +158,29 @@ impl VadConfig {
     /// Get the silence timeout in milliseconds for this VAD mode.
     pub fn silence_timeout_ms(&self) -> u64 {
         match self {
-            VadConfig::AlwaysOn { silence_timeout_ms } => *silence_timeout_ms,
+            VadConfig::AlwaysOn { silence_timeout_ms, .. } => *silence_timeout_ms,
             VadConfig::Gpio { silence_timeout_ms, .. } => *silence_timeout_ms,
             VadConfig::Energy { silence_timeout_ms, .. } => *silence_timeout_ms,
+        }
+    }
+
+    /// Seconds of audio to buffer as pre-roll before wake word detection.
+    /// Returns 0.0 for GPIO mode (no continuous capture).
+    pub fn buffer_seconds(&self) -> f64 {
+        match self {
+            VadConfig::AlwaysOn { buffer_seconds, .. } => *buffer_seconds,
+            VadConfig::Gpio { .. } => 0.0,
+            VadConfig::Energy { buffer_seconds, .. } => *buffer_seconds,
         }
     }
 }
 
 fn default_silence_timeout_ms() -> u64 {
     2500
+}
+
+fn default_buffer_seconds() -> f64 {
+    1.0
 }
 
 // ============================================================================
@@ -352,6 +371,23 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "audio config cannot specify both 'device' and 'wav_input'".into(),
             ));
+        }
+        let buffer_seconds = self.vad.buffer_seconds();
+        if buffer_seconds.is_nan() || buffer_seconds.is_infinite() {
+            return Err(ConfigError::Invalid(
+                "vad.buffer_seconds must be a finite number".into(),
+            ));
+        }
+        if buffer_seconds < 0.0 {
+            return Err(ConfigError::Invalid(
+                "vad.buffer_seconds must not be negative".into(),
+            ));
+        }
+        if buffer_seconds > 10.0 {
+            return Err(ConfigError::Invalid(format!(
+                "vad.buffer_seconds must be <= 10.0, got {}",
+                buffer_seconds
+            )));
         }
         Ok(())
     }
@@ -831,7 +867,7 @@ silence_timeout_ms = 3000
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         match &config.vad {
-            VadConfig::AlwaysOn { silence_timeout_ms } => {
+            VadConfig::AlwaysOn { silence_timeout_ms, .. } => {
                 assert_eq!(*silence_timeout_ms, 3000);
             }
             other => panic!("expected AlwaysOn VAD, got {:?}", other),
@@ -886,7 +922,7 @@ silence_timeout_ms = 2000
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         match &config.vad {
-            VadConfig::Energy { threshold, silence_timeout_ms } => {
+            VadConfig::Energy { threshold, silence_timeout_ms, .. } => {
                 assert_eq!(*threshold, 1500);
                 assert_eq!(*silence_timeout_ms, 2000);
             }
@@ -913,6 +949,119 @@ pin = 17
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.vad.silence_timeout_ms(), 2500); // default
+    }
+
+    #[test]
+    fn buffer_seconds_defaults() {
+        // AlwaysOn defaults to 1.0
+        let vad = VadConfig::AlwaysOn {
+            silence_timeout_ms: 2500,
+            buffer_seconds: default_buffer_seconds(),
+        };
+        assert_eq!(vad.buffer_seconds(), 1.0);
+
+        // Energy defaults to 1.0
+        let vad = VadConfig::Energy {
+            threshold: 1000,
+            silence_timeout_ms: 2500,
+            buffer_seconds: default_buffer_seconds(),
+        };
+        assert_eq!(vad.buffer_seconds(), 1.0);
+
+        // GPIO always returns 0.0
+        let vad = VadConfig::Gpio {
+            pin: 17,
+            silence_timeout_ms: 2500,
+        };
+        assert_eq!(vad.buffer_seconds(), 0.0);
+    }
+
+    #[test]
+    fn buffer_seconds_parsed_from_config() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "energy"
+threshold = 1500
+buffer_seconds = 2.5
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.vad.buffer_seconds(), 2.5);
+    }
+
+    #[test]
+    fn buffer_seconds_invalid_values_rejected() {
+        // Helper: build a minimal Config with the given VadConfig and call validate()
+        fn make_config(vad: VadConfig) -> Config {
+            Config {
+                satellite: SatelliteConfig { name: "test".into(), area: None },
+                server: ServerConfig { mode: "listen".into(), host: "localhost".into(), port: 10700 },
+                audio: AudioConfig {
+                    device: None,
+                    wav_input: Some("test.wav".into()),
+                    playback_device: None,
+                    wav_output: None,
+                    rate: 16000,
+                    width: 2,
+                    channels: 1,
+                    chunk_ms: 20,
+                },
+                vad,
+                feedback: vec![],
+            }
+        }
+
+        // Negative value
+        let cfg = make_config(VadConfig::AlwaysOn {
+            silence_timeout_ms: 2500,
+            buffer_seconds: -1.0,
+        });
+        assert!(cfg.validate().is_err(), "negative buffer_seconds should be rejected");
+
+        // Value exceeding 10.0
+        let cfg = make_config(VadConfig::AlwaysOn {
+            silence_timeout_ms: 2500,
+            buffer_seconds: 10.1,
+        });
+        assert!(cfg.validate().is_err(), "buffer_seconds > 10.0 should be rejected");
+
+        // Value exactly at the limit is accepted
+        let cfg = make_config(VadConfig::AlwaysOn {
+            silence_timeout_ms: 2500,
+            buffer_seconds: 10.0,
+        });
+        assert!(cfg.validate().is_ok(), "buffer_seconds == 10.0 should be accepted");
+
+        // Zero is valid
+        let cfg = make_config(VadConfig::AlwaysOn {
+            silence_timeout_ms: 2500,
+            buffer_seconds: 0.0,
+        });
+        assert!(cfg.validate().is_ok(), "buffer_seconds == 0.0 should be accepted");
+
+        // Energy variant: negative value rejected
+        let cfg = make_config(VadConfig::Energy {
+            threshold: 1000,
+            silence_timeout_ms: 2500,
+            buffer_seconds: -0.5,
+        });
+        assert!(cfg.validate().is_err(), "energy negative buffer_seconds should be rejected");
+
+        // Energy variant: too large
+        let cfg = make_config(VadConfig::Energy {
+            threshold: 1000,
+            silence_timeout_ms: 2500,
+            buffer_seconds: 99.0,
+        });
+        assert!(cfg.validate().is_err(), "energy buffer_seconds > 10.0 should be rejected");
     }
 
     #[test]

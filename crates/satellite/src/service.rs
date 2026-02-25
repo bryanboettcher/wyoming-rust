@@ -1,9 +1,11 @@
+use std::collections::VecDeque;
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 use wyoming::audio::{AudioChunk, AudioFormat, AudioStart, AudioStop};
 use wyoming::event::{Eventable, ProtocolError};
 use wyoming::info::{Attribution, MicProgram, SatelliteInfo, SndProgram};
+use wyoming::pipeline::{PipelineStage, RunPipeline};
 use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
@@ -41,6 +43,10 @@ pub struct SatelliteService {
     mic_running: bool,
     /// Timestamp of last voice activity detection.
     last_vad_active: Instant,
+    /// Ring buffer of recent audio frames for pre-roll before wake word.
+    preroll_buffer: VecDeque<Vec<u8>>,
+    /// Maximum number of frames in the pre-roll buffer.
+    preroll_max_frames: usize,
     config: Config,
 }
 
@@ -103,6 +109,15 @@ impl SatelliteService {
 
         let silence_timeout = Duration::from_millis(config.vad.silence_timeout_ms());
 
+        // Compute pre-roll buffer capacity from buffer_seconds and chunk_ms
+        let buffer_seconds = config.vad.buffer_seconds();
+        let preroll_max_frames = if buffer_seconds > 0.0 && config.audio.chunk_ms > 0 {
+            let chunk_secs = config.audio.chunk_ms as f64 / 1000.0;
+            (buffer_seconds / chunk_secs).ceil() as usize
+        } else {
+            0
+        };
+
         Ok(Self {
             mode,
             conn: None,
@@ -118,6 +133,8 @@ impl SatelliteService {
             silence_timeout,
             mic_running: false,
             last_vad_active: Instant::now(),
+            preroll_buffer: VecDeque::with_capacity(preroll_max_frames),
+            preroll_max_frames,
             config: config.clone(),
         })
     }
@@ -130,6 +147,10 @@ impl SatelliteService {
     ///
     /// On success, the service is ready for a session.
     pub fn establish_connection(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Clear any stale pre-roll frames from a prior session so they are not
+        // flushed to the new connection on the next VoiceDetected transition.
+        self.preroll_buffer.clear();
+
         let (conn, handshake) = match &self.mode {
             ConnectionMode::Listen(listener) => {
                 log::info!("Waiting for client connection...");
@@ -201,12 +222,28 @@ impl SatelliteService {
                         log::debug!("Mic started for continuous-capture VAD");
                     }
 
-                    // Read a frame and poll VAD
+                    // Read a frame, poll VAD first (borrow), then move into pre-roll buffer
                     match self.mic.read_frame() {
                         Ok(frame) => {
+                            // Poll VAD before buffering so we can borrow frame without cloning
                             if self.vad.poll(Some(&frame)) {
                                 self.last_vad_active = Instant::now();
+                                // Still buffer the frame so FlushPreRollBuffer includes it
+                                if self.preroll_max_frames > 0 {
+                                    if self.preroll_buffer.len() >= self.preroll_max_frames {
+                                        self.preroll_buffer.pop_front();
+                                    }
+                                    self.preroll_buffer.push_back(frame);
+                                }
                                 return Ok(Some(SatelliteInput::VoiceDetected));
+                            }
+
+                            // No voice detected: move frame into ring buffer (evict oldest if full)
+                            if self.preroll_max_frames > 0 {
+                                if self.preroll_buffer.len() >= self.preroll_max_frames {
+                                    self.preroll_buffer.pop_front();
+                                }
+                                self.preroll_buffer.push_back(frame);
                             }
                         }
                         Err(AudioError::EndOfStream) => {
@@ -390,10 +427,34 @@ impl SatelliteService {
                 }
             }
             Action::StopCapture => {
-                log::debug!("Action: StopCapture");
-                self.mic.stop()?;
-                self.mic_running = false;
-                self.vad.reset();
+                if self.vad.needs_continuous_capture() {
+                    // Keep mic running for pre-roll buffer; just reset VAD state
+                    log::debug!("Action: StopCapture (continuous VAD: mic stays running, VAD reset)");
+                    self.vad.reset();
+                } else {
+                    log::debug!("Action: StopCapture");
+                    self.mic.stop()?;
+                    self.mic_running = false;
+                    self.vad.reset();
+                }
+            }
+            Action::SendRunPipeline => {
+                log::debug!("Action: SendRunPipeline");
+                let conn = self.conn.as_mut().expect("no connection established");
+                // start_stage is Wake because this satellite streams raw audio to the
+                // server for openWakeWord detection — the server handles wake word
+                // recognition and must therefore start the pipeline from the Wake stage.
+                // This differs from the Python reference satellite which performs local
+                // wake word detection and sends start_stage: Asr (skipping the server's
+                // wake stage entirely).
+                conn.send(RunPipeline {
+                    start_stage: PipelineStage::Wake,
+                    end_stage: PipelineStage::Tts,
+                    wake_word_name: None,
+                    restart_on_end: false,
+                    wake_word_names: None,
+                    announce_text: None,
+                })?;
             }
             Action::SendAudioStart => {
                 log::debug!("Action: SendAudioStart");
@@ -407,6 +468,18 @@ impl SatelliteService {
                 log::debug!("Action: SendAudioStop");
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(AudioStop { timestamp: None })?;
+            }
+            Action::FlushPreRollBuffer => {
+                let frame_count = self.preroll_buffer.len();
+                log::debug!("Action: FlushPreRollBuffer ({} frames)", frame_count);
+                let conn = self.conn.as_mut().expect("no connection established");
+                for frame in self.preroll_buffer.drain(..) {
+                    conn.send(AudioChunk {
+                        format: self.audio_format,
+                        audio: frame,
+                        timestamp: None,
+                    })?;
+                }
             }
             Action::SendStreamingStarted => {
                 log::debug!("Action: SendStreamingStarted");

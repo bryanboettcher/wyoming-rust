@@ -37,8 +37,10 @@ pub enum SatelliteInput {
 pub enum Action {
     StartCapture,
     StopCapture,
+    SendRunPipeline,
     SendAudioStart,
     SendAudioStop,
+    FlushPreRollBuffer,
     SendStreamingStarted,
     SendStreamingStopped,
     StartPlayback,
@@ -88,7 +90,14 @@ pub fn transition(state: &SatelliteState, input: &SatelliteInput) -> (SatelliteS
         // ── IDLE ──────────────────────────────────────────
         (Idle, VoiceDetected) => (
             Streaming,
-            vec![Action::SetFeedback(FeedbackState::Listening), Action::StartCapture, Action::SendAudioStart, Action::SendStreamingStarted],
+            vec![
+                Action::SetFeedback(FeedbackState::Listening),
+                Action::StartCapture,
+                Action::SendRunPipeline,
+                Action::SendAudioStart,
+                Action::FlushPreRollBuffer,
+                Action::SendStreamingStarted,
+            ],
         ),
         // Server-initiated TTS (announcement): HA sends audio-start while we're idle
         (Idle, ServerTtsStart) => (

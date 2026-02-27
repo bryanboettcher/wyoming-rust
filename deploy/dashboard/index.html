@@ -208,11 +208,20 @@ header .subtitle {
   0%, 100% { border-color: var(--border); }
   30% { border-color: var(--red); }
 }
+
+/* Protocol event styling */
+.proto-out { color: var(--green); font-weight: 600; }
+.proto-in { color: var(--blue); font-weight: 600; }
+.proto-summary { color: var(--text-muted); font-weight: 400; }
+
+#protocolEvents {
+  max-height: 240px;
+}
 </style>
 </head>
 <body>
 
-<div id="banner" class="banner">Dashboard disconnected — retrying&hellip;</div>
+<div id="banner" class="banner">Dashboard disconnected &mdash; retrying&hellip;</div>
 
 <header>
   <h1>
@@ -229,15 +238,15 @@ header .subtitle {
   <div class="card-title">Connection</div>
   <div class="row">
     <span class="label">Status</span>
-    <span class="value" id="connStatus">—</span>
+    <span class="value" id="connStatus">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Server</span>
-    <span class="value" id="serverAddr">—</span>
+    <span class="value" id="serverAddr">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Last Ping</span>
-    <span class="value" id="lastPing">—</span>
+    <span class="value" id="lastPing">&mdash;</span>
   </div>
 </div>
 
@@ -245,15 +254,15 @@ header .subtitle {
   <div class="card-title">State Machine</div>
   <div class="row">
     <span class="label">State</span>
-    <span class="state-badge idle" id="stateBadge">—</span>
+    <span class="state-badge idle" id="stateBadge">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Feedback</span>
-    <span class="value" id="feedbackState">—</span>
+    <span class="value" id="feedbackState">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">In state for</span>
-    <span class="value" id="stateAge">—</span>
+    <span class="value" id="stateAge">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Interactions</span>
@@ -265,15 +274,15 @@ header .subtitle {
   <div class="card-title">Voice Activity Detection</div>
   <div class="row">
     <span class="label">Mode</span>
-    <span class="value" id="vadMode">—</span>
+    <span class="value" id="vadMode">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Phase</span>
-    <span class="value" id="vadPhase">—</span>
+    <span class="value" id="vadPhase">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Attack Threshold</span>
-    <span class="value" id="vadAttackThreshold">—</span>
+    <span class="value" id="vadAttackThreshold">&mdash;</span>
     <span class="threshold-control" id="attackControl" style="display:none">
       <input type="number" id="attackInput" min="1" max="65535" placeholder="value">
       <button id="attackBtn">Set</button>
@@ -281,7 +290,7 @@ header .subtitle {
   </div>
   <div class="row">
     <span class="label">Sustain Threshold</span>
-    <span class="value" id="vadSustainThreshold">—</span>
+    <span class="value" id="vadSustainThreshold">&mdash;</span>
     <span class="threshold-control" id="sustainControl" style="display:none">
       <input type="number" id="sustainInput" min="1" max="65535" placeholder="value">
       <button id="sustainBtn">Set</button>
@@ -289,11 +298,11 @@ header .subtitle {
   </div>
   <div class="row">
     <span class="label">Energy</span>
-    <span class="value" id="vadEnergy">—</span>
+    <span class="value" id="vadEnergy">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Triggered</span>
-    <span class="value" id="vadTriggered">—</span>
+    <span class="value" id="vadTriggered">&mdash;</span>
   </div>
   <div class="sparkline-wrap">
     <canvas id="sparkline"></canvas>
@@ -304,12 +313,19 @@ header .subtitle {
   <div class="card-title">Audio</div>
   <div class="row">
     <span class="label">Device</span>
-    <span class="value" id="audioDevice">—</span>
+    <span class="value" id="audioDevice">&mdash;</span>
   </div>
   <div class="row">
     <span class="label">Format</span>
-    <span class="value" id="audioFormat">—</span>
+    <span class="value" id="audioFormat">&mdash;</span>
   </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Protocol Events</div>
+  <ul class="history-list" id="protocolEvents">
+    <li><span class="ts">waiting for data&hellip;</span></li>
+  </ul>
 </div>
 
 <div class="card">
@@ -319,262 +335,6 @@ header .subtitle {
   </ul>
 </div>
 
-<script>
-(function() {
-  'use strict';
-
-  const POLL_MS = 1000;
-  const MAX_SAMPLES = 120;
-
-  // Ring buffer for energy sparkline
-  const energyHistory = [];
-  // State change log
-  const stateLog = [];
-  let lastState = null;
-  let attackThreshold = null;
-  let sustainThreshold = null;
-  let consecutiveErrors = 0;
-
-  // DOM refs
-  const $ = id => document.getElementById(id);
-
-  function formatDuration(secs) {
-    if (secs == null) return '—';
-    if (secs < 1) return '<1s';
-    if (secs < 60) return Math.floor(secs) + 's';
-    const m = Math.floor(secs / 60);
-    const s = Math.floor(secs % 60);
-    if (m < 60) return m + 'm ' + s + 's';
-    const h = Math.floor(m / 60);
-    return h + 'h ' + (m % 60) + 'm';
-  }
-
-  function formatAgo(secs) {
-    if (secs == null) return '—';
-    return formatDuration(secs) + ' ago';
-  }
-
-  function stateClass(s) {
-    const lower = (s || '').toLowerCase();
-    if (lower === 'idle') return 'idle';
-    if (lower === 'streaming') return 'streaming';
-    if (lower === 'processing') return 'processing';
-    if (lower === 'responding') return 'responding';
-    return 'idle';
-  }
-
-  function timeStr() {
-    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
-
-  function drawSparkline() {
-    const canvas = $('sparkline');
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-    const w = rect.width;
-    const h = rect.height;
-
-    ctx.clearRect(0, 0, w, h);
-
-    if (energyHistory.length < 2) return;
-
-    // Determine Y scale: max of both thresholds or highest energy, with padding
-    const maxEnergy = Math.max(...energyHistory, attackThreshold || 0, sustainThreshold || 0);
-    const yMax = Math.max(maxEnergy * 1.15, 100);
-    const pad = 4;
-    const monoFont = '9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
-
-    // Draw attack threshold line (red)
-    if (attackThreshold != null) {
-      const ty = h - pad - ((attackThreshold / yMax) * (h - pad * 2));
-      ctx.strokeStyle = '#c0392b44';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(0, ty);
-      ctx.lineTo(w, ty);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = '#c0392b88';
-      ctx.font = monoFont;
-      ctx.fillText('attack', 3, ty - 3);
-    }
-
-    // Draw sustain threshold line (amber)
-    if (sustainThreshold != null) {
-      const ty = h - pad - ((sustainThreshold / yMax) * (h - pad * 2));
-      ctx.strokeStyle = '#e67e2244';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.moveTo(0, ty);
-      ctx.lineTo(w, ty);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.fillStyle = '#e67e2288';
-      ctx.font = monoFont;
-      ctx.fillText('sustain', 3, ty - 3);
-    }
-
-    // Draw energy line
-    ctx.strokeStyle = '#2980b9';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    const step = w / (MAX_SAMPLES - 1);
-    const offset = MAX_SAMPLES - energyHistory.length;
-    for (let i = 0; i < energyHistory.length; i++) {
-      const x = (offset + i) * step;
-      const y = h - pad - ((energyHistory[i] / yMax) * (h - pad * 2));
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-  }
-
-  function update(data) {
-    consecutiveErrors = 0;
-    $('banner').classList.remove('visible');
-
-    // Header
-    $('satName').textContent = data.satellite_name || 'Wyoming Satellite';
-    const parts = [];
-    if (data.area) parts.push(data.area);
-    parts.push('up ' + formatDuration(data.uptime_seconds));
-    $('area').textContent = parts.join(' · ');
-
-    // Connection
-    const dot = $('connDot');
-    dot.className = 'dot ' + (data.connected ? 'dot-green' : 'dot-red');
-    $('connStatus').textContent = data.connected ? 'Connected' : 'Disconnected';
-    $('serverAddr').textContent = data.server_address || '—';
-    $('lastPing').textContent = formatAgo(data.last_ping_secs);
-
-    // State
-    const badge = $('stateBadge');
-    badge.textContent = data.state || '—';
-    badge.className = 'state-badge ' + stateClass(data.state);
-    $('feedbackState').textContent = data.feedback_state || '—';
-    $('stateAge').textContent = formatDuration(data.last_state_change_secs);
-    $('interactions').textContent = data.interaction_count != null ? data.interaction_count : '—';
-
-    // VAD
-    $('vadMode').textContent = data.vad_mode || '—';
-    // Phase indicator with color coding
-    const phase = data.vad_phase;
-    const phaseEl = $('vadPhase');
-    if (phase === 'attack') {
-      phaseEl.innerHTML = '<span class="dot dot-red"></span>attack';
-    } else if (phase === 'sustain') {
-      phaseEl.innerHTML = '<span class="dot dot-amber"></span>sustain';
-    } else {
-      phaseEl.textContent = '—';
-    }
-    attackThreshold = data.vad_attack_threshold;
-    sustainThreshold = data.vad_sustain_threshold;
-    $('vadAttackThreshold').textContent = attackThreshold != null ? attackThreshold : '—';
-    $('vadSustainThreshold').textContent = sustainThreshold != null ? sustainThreshold : '—';
-    // Show threshold controls only for energy VAD
-    const isEnergy = data.vad_mode === 'energy';
-    $('attackControl').style.display = isEnergy ? '' : 'none';
-    $('sustainControl').style.display = isEnergy ? '' : 'none';
-    const energy = data.vad_current_energy;
-    $('vadEnergy').textContent = energy != null ? energy : '—';
-    const triggered = $('vadTriggered');
-    if (data.vad_triggered) {
-      triggered.innerHTML = '<span class="dot dot-amber"></span>Yes';
-    } else {
-      triggered.textContent = 'No';
-    }
-
-    // Energy history
-    energyHistory.push(energy != null ? energy : 0);
-    if (energyHistory.length > MAX_SAMPLES) energyHistory.shift();
-    drawSparkline();
-
-    // Audio
-    $('audioDevice').textContent = data.audio_device || '—';
-    $('audioFormat').textContent = data.audio_format || '—';
-
-    // State history
-    if (data.state && data.state !== lastState) {
-      stateLog.unshift({ time: timeStr(), from: lastState, to: data.state });
-      if (stateLog.length > 30) stateLog.pop();
-      renderHistory();
-      lastState = data.state;
-    }
-    if (lastState === null) lastState = data.state;
-  }
-
-  function renderHistory() {
-    const ul = $('stateHistory');
-    if (stateLog.length === 0) {
-      ul.innerHTML = '<li><span class="ts">no transitions yet</span></li>';
-      return;
-    }
-    ul.innerHTML = stateLog.map(e =>
-      '<li><span class="ts">' + e.time + '</span><span>' +
-      (e.from || '?') + ' → ' + e.to + '</span></li>'
-    ).join('');
-  }
-
-  async function poll() {
-    try {
-      const res = await fetch('/api/');
-      if (!res.ok) throw new Error(res.status);
-      const data = await res.json();
-      update(data);
-    } catch (err) {
-      consecutiveErrors++;
-      if (consecutiveErrors >= 3) {
-        $('banner').classList.add('visible');
-      }
-    }
-  }
-
-  // Start polling
-  poll();
-  setInterval(poll, POLL_MS);
-
-  // Redraw sparkline on resize
-  window.addEventListener('resize', drawSparkline);
-
-  // Threshold tuning
-  async function setThresholdValue(inputId, endpoint) {
-    const input = $(inputId);
-    const val = parseInt(input.value, 10);
-    if (!val || val < 1 || val > 65535) {
-      flash(input, 'flash-err');
-      return;
-    }
-    try {
-      const res = await fetch(endpoint, { method: 'POST', body: String(val) });
-      if (!res.ok) throw new Error(res.status);
-      flash(input, 'flash-ok');
-      input.value = '';
-    } catch (err) {
-      flash(input, 'flash-err');
-    }
-  }
-
-  function flash(el, cls) {
-    el.classList.remove('flash-ok', 'flash-err');
-    void el.offsetWidth; // force reflow to restart animation
-    el.classList.add(cls);
-  }
-
-  $('attackBtn').addEventListener('click', () => setThresholdValue('attackInput', '/api/vad/attack_threshold'));
-  $('attackInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') setThresholdValue('attackInput', '/api/vad/attack_threshold');
-  });
-  $('sustainBtn').addEventListener('click', () => setThresholdValue('sustainInput', '/api/vad/sustain_threshold'));
-  $('sustainInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') setThresholdValue('sustainInput', '/api/vad/sustain_threshold');
-  });
-})();
-</script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use config::Config;
-use diagnostics::{DiagnosticsState, SharedDiagnostics};
+use diagnostics::{DiagnosticsState, SharedDiagnostics, SseClients};
 use service::SatelliteService;
 use state::{transition, Action, FeedbackState, SatelliteState};
 
@@ -56,11 +56,14 @@ fn run(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut service = SatelliteService::new(config)?;
 
     let diagnostics: SharedDiagnostics = Arc::new(Mutex::new(DiagnosticsState::new(config)));
+    let sse_clients: SseClients = Arc::new(Mutex::new(Vec::new()));
 
     if config.diagnostics.enabled {
         let bind_addr = format!("{}:{}", config.diagnostics.bind, config.diagnostics.port);
-        diagnostics::spawn_http_server(&bind_addr, Arc::clone(&diagnostics));
+        diagnostics::spawn_http_server(&bind_addr, Arc::clone(&diagnostics), Arc::clone(&sse_clients));
     }
+
+    service.set_sse_clients(Arc::clone(&sse_clients));
 
     // Outer loop: connection lifecycle
     loop {

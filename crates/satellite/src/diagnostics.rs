@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -98,6 +99,24 @@ impl DiagnosticsState {
         }
     }
 
+    /// Build a JSON string with static config for the initial SSE snapshot event.
+    fn to_sse_snapshot(&self) -> String {
+        format!(
+            r#"{{"satellite_name":"{}","area":{},"audio_device":"{}","audio_format":"{}","vad_mode":"{}","attack_threshold":{},"sustain_threshold":{},"server_address":"{}"}}"#,
+            self.satellite_name,
+            match &self.area {
+                Some(a) => format!(r#""{}""#, a),
+                None => "null".into(),
+            },
+            self.audio_device,
+            self.audio_format,
+            self.vad_mode,
+            self.vad_attack_threshold.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
+            self.vad_sustain_threshold.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
+            self.server_address,
+        )
+    }
+
     /// Build a serializable snapshot on demand (only called on HTTP request).
     fn to_snapshot(&self) -> DiagnosticsSnapshot {
         let now = Instant::now();
@@ -160,8 +179,27 @@ pub struct DiagnosticsSnapshot {
 
 pub type SharedDiagnostics = Arc<Mutex<DiagnosticsState>>;
 
+/// Registry of connected SSE clients. Each client has a bounded channel sender.
+pub type SseClients = Arc<Mutex<Vec<SyncSender<String>>>>;
+
+const MAX_SSE_CLIENTS: usize = 3;
+
+/// Push a pre-formatted SSE frame to all connected clients.
+///
+/// Drops frames silently if a client's buffer is full (real-time data).
+/// Removes disconnected clients.
+pub fn push_sse(clients: &SseClients, event_type: &str, json: &str) {
+    let frame = format!("event: {}\ndata: {}\n\n", event_type, json);
+    let mut clients = clients.lock().unwrap();
+    clients.retain(|tx| match tx.try_send(frame.clone()) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => true, // keep client, drop frame
+        Err(TrySendError::Disconnected(_)) => false, // remove dead client
+    });
+}
+
 /// Start the diagnostics HTTP server on a background thread.
-pub fn spawn_http_server(bind_addr: &str, diagnostics: SharedDiagnostics) {
+pub fn spawn_http_server(bind_addr: &str, diagnostics: SharedDiagnostics, sse_clients: SseClients) {
     let listener = TcpListener::bind(bind_addr)
         .unwrap_or_else(|e| panic!("Failed to bind diagnostics server on {}: {}", bind_addr, e));
 
@@ -178,7 +216,7 @@ pub fn spawn_http_server(bind_addr: &str, diagnostics: SharedDiagnostics) {
                             .set_read_timeout(Some(std::time::Duration::from_secs(5)));
                         let _ = stream
                             .set_write_timeout(Some(std::time::Duration::from_secs(5)));
-                        if let Err(e) = handle_request(&mut stream, &diagnostics) {
+                        if let Err(e) = handle_request(&mut stream, &diagnostics, &sse_clients) {
                             log::debug!("Diagnostics HTTP error: {}", e);
                         }
                     }
@@ -194,6 +232,7 @@ pub fn spawn_http_server(bind_addr: &str, diagnostics: SharedDiagnostics) {
 fn handle_request(
     stream: &mut std::net::TcpStream,
     diagnostics: &SharedDiagnostics,
+    sse_clients: &SseClients,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
@@ -247,6 +286,11 @@ fn handle_request(
                 json
             )?;
         }
+        ("GET", "/stream") => {
+            handle_sse_connection(stream, diagnostics, sse_clients)?;
+            // SSE connection runs in a spawned thread; don't flush/close here
+            return Ok(());
+        }
         ("POST", "/vad/attack_threshold") => {
             handle_set_threshold(stream, &mut reader, diagnostics, content_length, ThresholdKind::Attack)?;
         }
@@ -265,6 +309,83 @@ fn handle_request(
     }
 
     stream.flush()?;
+    Ok(())
+}
+
+fn handle_sse_connection(
+    stream: &mut std::net::TcpStream,
+    diagnostics: &SharedDiagnostics,
+    sse_clients: &SseClients,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Check client limit
+    let client_count = sse_clients.lock().unwrap().len();
+    if client_count >= MAX_SSE_CLIENTS {
+        let body = "Too many SSE clients";
+        write!(
+            stream,
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )?;
+        stream.flush()?;
+        return Ok(());
+    }
+
+    // Send SSE response headers
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
+    )?;
+
+    // Send initial snapshot
+    let snapshot_json = {
+        let d = diagnostics.lock().unwrap();
+        d.to_sse_snapshot()
+    };
+    write!(stream, "event: snapshot\ndata: {}\n\n", snapshot_json)?;
+    stream.flush()?;
+
+    // Create channel and register client
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(256);
+    sse_clients.lock().unwrap().push(tx);
+    log::info!("SSE client connected ({} total)", client_count + 1);
+
+    // Clone stream for the SSE writer thread — remove timeouts for long-lived connection
+    let mut sse_stream = stream.try_clone()?;
+    let _ = sse_stream.set_read_timeout(None);
+    let _ = sse_stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+
+    std::thread::Builder::new()
+        .name("sse-client".into())
+        .stack_size(64 * 1024)
+        .spawn(move || {
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_secs(15)) {
+                    Ok(frame) => {
+                        if sse_stream.write_all(frame.as_bytes()).is_err() {
+                            break;
+                        }
+                        if sse_stream.flush().is_err() {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Send keepalive comment
+                        if write!(sse_stream, ": keepalive\n\n").is_err() {
+                            break;
+                        }
+                        if sse_stream.flush().is_err() {
+                            break;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break;
+                    }
+                }
+            }
+            log::info!("SSE client disconnected");
+        })?;
+
     Ok(())
 }
 
@@ -330,6 +451,10 @@ fn handle_set_threshold(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_sse_clients() -> SseClients {
+        Arc::new(Mutex::new(Vec::new()))
+    }
 
     fn test_config() -> Config {
         let toml = r#"
@@ -450,7 +575,7 @@ sustain_threshold = 400
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                 .unwrap();
-            handle_request(&mut stream, &diag_clone).unwrap();
+            handle_request(&mut stream, &diag_clone, &test_sse_clients()).unwrap();
         });
 
         // Disconnected → 503
@@ -477,7 +602,7 @@ sustain_threshold = 400
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                 .unwrap();
-            handle_request(&mut stream, &diag_clone).unwrap();
+            handle_request(&mut stream, &diag_clone, &test_sse_clients()).unwrap();
         });
 
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
@@ -504,7 +629,7 @@ sustain_threshold = 400
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                 .unwrap();
-            handle_request(&mut stream, &diag_clone).unwrap();
+            handle_request(&mut stream, &diag_clone, &test_sse_clients()).unwrap();
         });
 
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
@@ -530,7 +655,7 @@ sustain_threshold = 400
             stream
                 .set_read_timeout(Some(std::time::Duration::from_secs(1)))
                 .unwrap();
-            handle_request(&mut stream, &diag_clone).unwrap();
+            handle_request(&mut stream, &diag_clone, &test_sse_clients()).unwrap();
         });
 
         let mut stream = std::net::TcpStream::connect(addr).unwrap();

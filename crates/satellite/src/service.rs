@@ -10,7 +10,7 @@ use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
 use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError, HandshakeResult};
-use crate::diagnostics::SharedDiagnostics;
+use crate::diagnostics::{push_sse, SharedDiagnostics, SseClients};
 use crate::feedback::{self, Feedback, FanoutFeedback};
 use crate::hardware::{AudioError, AudioSink, AudioSource, Vad};
 use crate::state::{Action, FeedbackState, SatelliteInput, SatelliteState};
@@ -49,6 +49,8 @@ pub struct SatelliteService {
     /// Maximum number of frames in the pre-roll buffer.
     preroll_max_frames: usize,
     config: Config,
+    /// SSE client registry for real-time streaming of tick data and protocol events.
+    sse_clients: Option<SseClients>,
 }
 
 impl SatelliteService {
@@ -137,7 +139,13 @@ impl SatelliteService {
             preroll_buffer: VecDeque::with_capacity(preroll_max_frames),
             preroll_max_frames,
             config: config.clone(),
+            sse_clients: None,
         })
+    }
+
+    /// Register SSE client list for real-time event streaming.
+    pub fn set_sse_clients(&mut self, clients: SseClients) {
+        self.sse_clients = Some(clients);
     }
 
     /// Block until a connection is established and the handshake completes.
@@ -205,6 +213,18 @@ impl SatelliteService {
         &mut self,
         event: &wyoming::event::Event,
     ) -> Option<SatelliteInput> {
+        // Push incoming protocol event to SSE clients (skip audio-chunk — too frequent)
+        if event.event_type != "audio-chunk" {
+            if let Some(ref clients) = self.sse_clients {
+                let summary = summarize_event(event);
+                let json = format!(
+                    r#"{{"dir":"in","type":"{}","summary":"{}"}}"#,
+                    event.event_type, summary
+                );
+                push_sse(clients, "protocol", &json);
+            }
+        }
+
         // Capture AudioFormat from audio-start events for playback configuration
         if event.event_type == AudioStart::EVENT_TYPE {
             match AudioStart::from_event(event.clone()) {
@@ -471,12 +491,6 @@ impl SatelliteService {
             Action::SendRunPipeline => {
                 log::debug!("Action: SendRunPipeline");
                 let conn = self.conn.as_mut().expect("no connection established");
-                // start_stage is Wake because this satellite streams raw audio to the
-                // server for openWakeWord detection — the server handles wake word
-                // recognition and must therefore start the pipeline from the Wake stage.
-                // This differs from the Python reference satellite which performs local
-                // wake word detection and sends start_stage: Asr (skipping the server's
-                // wake stage entirely).
                 conn.send(RunPipeline {
                     start_stage: PipelineStage::Wake,
                     end_stage: PipelineStage::Tts,
@@ -485,6 +499,7 @@ impl SatelliteService {
                     wake_word_names: None,
                     announce_text: None,
                 })?;
+                self.push_protocol_out("run-pipeline", "start_stage=wake");
             }
             Action::SendAudioStart => {
                 log::debug!("Action: SendAudioStart");
@@ -493,11 +508,13 @@ impl SatelliteService {
                     format: self.audio_format,
                     timestamp: None,
                 })?;
+                self.push_protocol_out("audio-start", "");
             }
             Action::SendAudioStop => {
                 log::debug!("Action: SendAudioStop");
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(AudioStop { timestamp: None })?;
+                self.push_protocol_out("audio-stop", "");
             }
             Action::FlushPreRollBuffer => {
                 let frame_count = self.preroll_buffer.len();
@@ -515,11 +532,13 @@ impl SatelliteService {
                 log::debug!("Action: SendStreamingStarted");
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(StreamingStarted)?;
+                self.push_protocol_out("streaming-started", "");
             }
             Action::SendStreamingStopped => {
                 log::debug!("Action: SendStreamingStopped");
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(StreamingStopped)?;
+                self.push_protocol_out("streaming-stopped", "");
             }
             Action::StartPlayback => {
                 log::debug!("Action: StartPlayback (format: {}Hz {}ch)",
@@ -534,6 +553,7 @@ impl SatelliteService {
                 log::debug!("Action: SendPlayed");
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(Played)?;
+                self.push_protocol_out("played", "");
             }
             Action::SetFeedback(state) => {
                 log::debug!("Action: SetFeedback({:?})", state);
@@ -579,11 +599,77 @@ impl SatelliteService {
         if let Some(conn) = &self.conn {
             d.last_ping_received = conn.last_ping_received;
         }
+
+        // Push tick data to SSE clients
+        if let Some(ref clients) = self.sse_clients {
+            let energy = self.vad.last_energy();
+            let phase = self.vad.phase().unwrap_or("-");
+            let active_threshold = match phase {
+                "sustain" => d.vad_sustain_threshold,
+                _ => d.vad_attack_threshold,
+            };
+            let triggered = match (energy, active_threshold) {
+                (Some(e), Some(t)) => e >= t,
+                _ => false,
+            };
+            let json = format!(
+                r#"{{"energy":{},"phase":"{}","state":"{:?}","feedback":"{:?}","triggered":{},"connected":{}}}"#,
+                energy.map(|e| e.to_string()).unwrap_or_else(|| "null".into()),
+                phase,
+                state,
+                feedback_state,
+                triggered,
+                d.connected,
+            );
+            push_sse(clients, "tick", &json);
+        }
+    }
+
+    /// Push an outgoing protocol event to SSE clients.
+    fn push_protocol_out(&self, event_type: &str, summary: &str) {
+        if let Some(ref clients) = self.sse_clients {
+            let json = format!(
+                r#"{{"dir":"out","type":"{}","summary":"{}"}}"#,
+                event_type, summary
+            );
+            push_sse(clients, "protocol", &json);
+        }
     }
 
     /// Cleanly shut down all feedback providers.
     pub fn shutdown(&mut self) {
         self.feedback.shutdown();
+    }
+}
+
+/// Extract a human-readable summary from an incoming Wyoming event.
+fn summarize_event(event: &wyoming::event::Event) -> String {
+    match event.event_type.as_str() {
+        "detection" => event
+            .data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| format!("name={}", n))
+            .unwrap_or_default(),
+        "transcript" => event
+            .data
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|t| format!("text={}", t))
+            .unwrap_or_default(),
+        "run-pipeline" => event
+            .data
+            .get("start_stage")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("start_stage={}", s))
+            .unwrap_or_default(),
+        "audio-start" => event
+            .data
+            .get("rate")
+            .and_then(|v| v.as_u64())
+            .map(|r| format!("rate={}", r))
+            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 

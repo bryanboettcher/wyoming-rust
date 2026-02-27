@@ -80,13 +80,27 @@ pub trait Vad {
         None
     }
 
-    /// Returns the current threshold, if applicable.
-    fn threshold(&self) -> Option<u16> {
+    /// Returns the current attack threshold (onset detection), if applicable.
+    fn attack_threshold(&self) -> Option<u16> {
         None
     }
 
-    /// Update the threshold at runtime. No-op for modes without a threshold.
-    fn set_threshold(&mut self, _threshold: u16) {}
+    /// Returns the current sustain threshold (keep-alive during speech), if applicable.
+    fn sustain_threshold(&self) -> Option<u16> {
+        None
+    }
+
+    /// Update the attack threshold at runtime. No-op for modes without thresholds.
+    fn set_attack_threshold(&mut self, _threshold: u16) {}
+
+    /// Update the sustain threshold at runtime. No-op for modes without thresholds.
+    fn set_sustain_threshold(&mut self, _threshold: u16) {}
+
+    /// Returns the current VAD phase: "attack" (waiting for onset) or "sustain"
+    /// (voice detected, using lower threshold). None for modes without phases.
+    fn phase(&self) -> Option<&str> {
+        None
+    }
 }
 
 // ============================================================================
@@ -353,16 +367,49 @@ impl Vad for GpioVad {
     }
 }
 
-/// Energy-based VAD. Computes RMS on PCM16LE frames and compares to threshold.
+/// Energy-based VAD with Schmitt trigger hysteresis.
+///
+/// Uses two thresholds for robust voice detection:
+/// - **Attack threshold** (higher): energy must exceed this to detect speech onset.
+/// - **Sustain threshold** (lower): once triggered, energy only needs to stay
+///   above this to keep the stream alive during quieter sustained speech.
+///
+/// Phase transitions:
+/// - `reset()` → attack phase (waiting for onset)
+/// - First `poll()` returning true → sustain phase (voice active)
+/// - `reset()` → back to attack phase
 pub struct EnergyVad {
-    threshold: u16,
+    attack_threshold: u16,
+    sustain_threshold: u16,
     last_rms: u16,
+    /// true = sustain phase (voice detected, using lower threshold)
+    sustaining: bool,
 }
 
 impl EnergyVad {
-    pub fn new(threshold: u16) -> Self {
-        log::info!("Energy VAD initialized with threshold {}", threshold);
-        Self { threshold, last_rms: 0 }
+    pub fn new(attack_threshold: u16, sustain_threshold: u16) -> Self {
+        // Resolve sustain=0 to attack/2 as a sensible default
+        let effective_sustain = if sustain_threshold == 0 {
+            attack_threshold / 2
+        } else {
+            sustain_threshold
+        };
+        if effective_sustain >= attack_threshold {
+            log::warn!(
+                "Sustain threshold ({}) >= attack threshold ({}); hysteresis will have no effect",
+                effective_sustain, attack_threshold
+            );
+        }
+        log::info!(
+            "Energy VAD initialized: attack={}, sustain={}",
+            attack_threshold, effective_sustain
+        );
+        Self {
+            attack_threshold,
+            sustain_threshold: effective_sustain,
+            last_rms: 0,
+            sustaining: false,
+        }
     }
 
     /// Compute RMS (root mean square) of PCM16LE audio frame.
@@ -398,7 +445,22 @@ impl Vad for EnergyVad {
             Some(frame) => {
                 let rms = Self::compute_rms(frame);
                 self.last_rms = rms;
-                rms >= self.threshold
+
+                let active_threshold = if self.sustaining {
+                    self.sustain_threshold
+                } else {
+                    self.attack_threshold
+                };
+
+                let triggered = rms >= active_threshold;
+
+                // Transition from attack to sustain on first trigger
+                if triggered && !self.sustaining {
+                    self.sustaining = true;
+                    log::debug!("VAD phase: attack -> sustain (rms={})", rms);
+                }
+
+                triggered
             }
             None => {
                 log::warn!("EnergyVad.poll() called without audio frame");
@@ -413,18 +475,31 @@ impl Vad for EnergyVad {
 
     fn reset(&mut self) {
         self.last_rms = 0;
+        self.sustaining = false;
     }
 
     fn last_energy(&self) -> Option<u16> {
         Some(self.last_rms)
     }
 
-    fn threshold(&self) -> Option<u16> {
-        Some(self.threshold)
+    fn attack_threshold(&self) -> Option<u16> {
+        Some(self.attack_threshold)
     }
 
-    fn set_threshold(&mut self, threshold: u16) {
-        self.threshold = threshold;
+    fn sustain_threshold(&self) -> Option<u16> {
+        Some(self.sustain_threshold)
+    }
+
+    fn set_attack_threshold(&mut self, threshold: u16) {
+        self.attack_threshold = threshold;
+    }
+
+    fn set_sustain_threshold(&mut self, threshold: u16) {
+        self.sustain_threshold = threshold;
+    }
+
+    fn phase(&self) -> Option<&str> {
+        Some(if self.sustaining { "sustain" } else { "attack" })
     }
 }
 
@@ -451,7 +526,7 @@ mod tests {
 
     #[test]
     fn energy_vad_silence_no_trigger() {
-        let mut vad = EnergyVad::new(1000);
+        let mut vad = EnergyVad::new(1000, 500);
         let silence = vec![0u8; 640]; // All zeros = RMS 0
         assert!(!vad.poll(Some(&silence)));
         assert!(vad.needs_continuous_capture());
@@ -459,7 +534,7 @@ mod tests {
 
     #[test]
     fn energy_vad_loud_frame_triggers() {
-        let mut vad = EnergyVad::new(1000);
+        let mut vad = EnergyVad::new(1000, 500);
         // Create a loud frame: 320 samples at max amplitude
         let mut loud_frame = Vec::with_capacity(640);
         for _ in 0..320 {
@@ -470,30 +545,30 @@ mod tests {
 
     #[test]
     fn energy_vad_threshold_boundary() {
-        let mut vad = EnergyVad::new(5000);
-        // Create frame right at threshold
+        let mut vad = EnergyVad::new(5000, 2500);
+        // Create frame right at attack threshold
         let mut frame = Vec::with_capacity(640);
         for _ in 0..320 {
             frame.extend_from_slice(&5000i16.to_le_bytes());
         }
-        assert!(vad.poll(Some(&frame))); // RMS = 5000, threshold = 5000, should trigger
+        assert!(vad.poll(Some(&frame))); // RMS = 5000, attack = 5000, should trigger
     }
 
     #[test]
     fn energy_vad_empty_frame_safe() {
-        let mut vad = EnergyVad::new(1000);
+        let mut vad = EnergyVad::new(1000, 500);
         assert!(!vad.poll(Some(&[])));
     }
 
     #[test]
     fn energy_vad_no_frame_returns_false() {
-        let mut vad = EnergyVad::new(1000);
+        let mut vad = EnergyVad::new(1000, 500);
         assert!(!vad.poll(None));
     }
 
     #[test]
     fn energy_vad_last_energy_tracks_rms() {
-        let mut vad = EnergyVad::new(1000);
+        let mut vad = EnergyVad::new(1000, 500);
         assert_eq!(vad.last_energy(), Some(0));
 
         // Poll with a loud frame
@@ -516,29 +591,93 @@ mod tests {
     }
 
     #[test]
-    fn energy_vad_set_threshold() {
-        let mut vad = EnergyVad::new(5000);
-        assert_eq!(vad.threshold(), Some(5000));
+    fn energy_vad_set_attack_threshold() {
+        let mut vad = EnergyVad::new(5000, 2000);
+        assert_eq!(vad.attack_threshold(), Some(5000));
 
-        // Frame at RMS 3000 — below initial threshold
+        // Frame at RMS 3000 — below initial attack threshold
         let mut frame = Vec::with_capacity(640);
         for _ in 0..320 {
             frame.extend_from_slice(&3000i16.to_le_bytes());
         }
         assert!(!vad.poll(Some(&frame)));
 
-        // Lower threshold — same frame should now trigger
-        vad.set_threshold(2000);
-        assert_eq!(vad.threshold(), Some(2000));
+        // Lower attack threshold — same frame should now trigger
+        vad.set_attack_threshold(2000);
+        assert_eq!(vad.attack_threshold(), Some(2000));
         assert!(vad.poll(Some(&frame)));
     }
 
     #[test]
-    fn always_on_vad_threshold_none() {
+    fn energy_vad_set_sustain_threshold() {
+        let mut vad = EnergyVad::new(5000, 2000);
+        assert_eq!(vad.sustain_threshold(), Some(2000));
+
+        vad.set_sustain_threshold(3000);
+        assert_eq!(vad.sustain_threshold(), Some(3000));
+    }
+
+    #[test]
+    fn always_on_vad_thresholds_none() {
         let mut vad = AlwaysOnVad::new();
-        assert_eq!(vad.threshold(), None);
-        vad.set_threshold(1000); // no-op
-        assert_eq!(vad.threshold(), None);
+        assert_eq!(vad.attack_threshold(), None);
+        assert_eq!(vad.sustain_threshold(), None);
+        assert_eq!(vad.phase(), None);
+        vad.set_attack_threshold(1000); // no-op
+        vad.set_sustain_threshold(500); // no-op
+        assert_eq!(vad.attack_threshold(), None);
+    }
+
+    #[test]
+    fn energy_vad_sustain_default() {
+        // sustain=0 should resolve to attack/2
+        let vad = EnergyVad::new(1000, 0);
+        assert_eq!(vad.attack_threshold(), Some(1000));
+        assert_eq!(vad.sustain_threshold(), Some(500));
+    }
+
+    #[test]
+    fn energy_vad_schmitt_trigger_phases() {
+        let mut vad = EnergyVad::new(500, 200);
+        assert_eq!(vad.phase(), Some("attack"));
+
+        // Frame at RMS 300 — above sustain (200) but below attack (500)
+        let mut mid_frame = Vec::with_capacity(640);
+        for _ in 0..320 {
+            mid_frame.extend_from_slice(&300i16.to_le_bytes());
+        }
+
+        // In attack phase, 300 < 500 → no trigger
+        assert!(!vad.poll(Some(&mid_frame)));
+        assert_eq!(vad.phase(), Some("attack"));
+
+        // Frame at RMS 600 — above attack threshold → triggers, enters sustain phase
+        let mut loud_frame = Vec::with_capacity(640);
+        for _ in 0..320 {
+            loud_frame.extend_from_slice(&600i16.to_le_bytes());
+        }
+        assert!(vad.poll(Some(&loud_frame)));
+        assert_eq!(vad.phase(), Some("sustain"));
+
+        // Now in sustain phase, 300 >= 200 → still active
+        assert!(vad.poll(Some(&mid_frame)));
+        assert_eq!(vad.phase(), Some("sustain"));
+
+        // Frame at RMS 100 — below sustain threshold → not active
+        let mut quiet_frame = Vec::with_capacity(640);
+        for _ in 0..320 {
+            quiet_frame.extend_from_slice(&100i16.to_le_bytes());
+        }
+        assert!(!vad.poll(Some(&quiet_frame)));
+        // Still in sustain phase (phase doesn't revert on silence, only on reset)
+        assert_eq!(vad.phase(), Some("sustain"));
+
+        // Reset returns to attack phase
+        vad.reset();
+        assert_eq!(vad.phase(), Some("attack"));
+
+        // Now mid_frame (300) doesn't trigger again because attack threshold is 500
+        assert!(!vad.poll(Some(&mid_frame)));
     }
 
     #[test]

@@ -267,12 +267,24 @@ header .subtitle {
     <span class="label">Mode</span>
     <span class="value" id="vadMode">—</span>
   </div>
-  <div class="row" id="thresholdRow">
-    <span class="label">Threshold</span>
-    <span class="value" id="vadThreshold">—</span>
-    <span class="threshold-control" id="thresholdControl" style="display:none">
-      <input type="number" id="thresholdInput" min="1" max="65535" placeholder="value">
-      <button id="thresholdBtn">Set</button>
+  <div class="row">
+    <span class="label">Phase</span>
+    <span class="value" id="vadPhase">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Attack Threshold</span>
+    <span class="value" id="vadAttackThreshold">—</span>
+    <span class="threshold-control" id="attackControl" style="display:none">
+      <input type="number" id="attackInput" min="1" max="65535" placeholder="value">
+      <button id="attackBtn">Set</button>
+    </span>
+  </div>
+  <div class="row">
+    <span class="label">Sustain Threshold</span>
+    <span class="value" id="vadSustainThreshold">—</span>
+    <span class="threshold-control" id="sustainControl" style="display:none">
+      <input type="number" id="sustainInput" min="1" max="65535" placeholder="value">
+      <button id="sustainBtn">Set</button>
     </span>
   </div>
   <div class="row">
@@ -319,7 +331,8 @@ header .subtitle {
   // State change log
   const stateLog = [];
   let lastState = null;
-  let threshold = null;
+  let attackThreshold = null;
+  let sustainThreshold = null;
   let consecutiveErrors = 0;
 
   // DOM refs
@@ -369,14 +382,15 @@ header .subtitle {
 
     if (energyHistory.length < 2) return;
 
-    // Determine Y scale: max of threshold or highest energy, with padding
-    const maxEnergy = Math.max(...energyHistory, threshold || 0);
+    // Determine Y scale: max of both thresholds or highest energy, with padding
+    const maxEnergy = Math.max(...energyHistory, attackThreshold || 0, sustainThreshold || 0);
     const yMax = Math.max(maxEnergy * 1.15, 100);
     const pad = 4;
+    const monoFont = '9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
 
-    // Draw threshold line
-    if (threshold != null) {
-      const ty = h - pad - ((threshold / yMax) * (h - pad * 2));
+    // Draw attack threshold line (red)
+    if (attackThreshold != null) {
+      const ty = h - pad - ((attackThreshold / yMax) * (h - pad * 2));
       ctx.strokeStyle = '#c0392b44';
       ctx.lineWidth = 1;
       ctx.setLineDash([4, 3]);
@@ -385,11 +399,25 @@ header .subtitle {
       ctx.lineTo(w, ty);
       ctx.stroke();
       ctx.setLineDash([]);
-
-      // Label
       ctx.fillStyle = '#c0392b88';
-      ctx.font = '9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
-      ctx.fillText('threshold', 3, ty - 3);
+      ctx.font = monoFont;
+      ctx.fillText('attack', 3, ty - 3);
+    }
+
+    // Draw sustain threshold line (amber)
+    if (sustainThreshold != null) {
+      const ty = h - pad - ((sustainThreshold / yMax) * (h - pad * 2));
+      ctx.strokeStyle = '#e67e2244';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(0, ty);
+      ctx.lineTo(w, ty);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#e67e2288';
+      ctx.font = monoFont;
+      ctx.fillText('sustain', 3, ty - 3);
     }
 
     // Draw energy line
@@ -435,10 +463,24 @@ header .subtitle {
 
     // VAD
     $('vadMode').textContent = data.vad_mode || '—';
-    threshold = data.vad_threshold;
-    $('vadThreshold').textContent = threshold != null ? threshold : '—';
-    // Show threshold control only for energy VAD
-    $('thresholdControl').style.display = data.vad_mode === 'energy' ? '' : 'none';
+    // Phase indicator with color coding
+    const phase = data.vad_phase;
+    const phaseEl = $('vadPhase');
+    if (phase === 'attack') {
+      phaseEl.innerHTML = '<span class="dot dot-red"></span>attack';
+    } else if (phase === 'sustain') {
+      phaseEl.innerHTML = '<span class="dot dot-amber"></span>sustain';
+    } else {
+      phaseEl.textContent = '—';
+    }
+    attackThreshold = data.vad_attack_threshold;
+    sustainThreshold = data.vad_sustain_threshold;
+    $('vadAttackThreshold').textContent = attackThreshold != null ? attackThreshold : '—';
+    $('vadSustainThreshold').textContent = sustainThreshold != null ? sustainThreshold : '—';
+    // Show threshold controls only for energy VAD
+    const isEnergy = data.vad_mode === 'energy';
+    $('attackControl').style.display = isEnergy ? '' : 'none';
+    $('sustainControl').style.display = isEnergy ? '' : 'none';
     const energy = data.vad_current_energy;
     $('vadEnergy').textContent = energy != null ? energy : '—';
     const triggered = $('vadTriggered');
@@ -501,15 +543,15 @@ header .subtitle {
   window.addEventListener('resize', drawSparkline);
 
   // Threshold tuning
-  async function setThreshold() {
-    const input = $('thresholdInput');
+  async function setThresholdValue(inputId, endpoint) {
+    const input = $(inputId);
     const val = parseInt(input.value, 10);
     if (!val || val < 1 || val > 65535) {
       flash(input, 'flash-err');
       return;
     }
     try {
-      const res = await fetch('/api/vad/threshold', { method: 'POST', body: String(val) });
+      const res = await fetch(endpoint, { method: 'POST', body: String(val) });
       if (!res.ok) throw new Error(res.status);
       flash(input, 'flash-ok');
       input.value = '';
@@ -524,9 +566,13 @@ header .subtitle {
     el.classList.add(cls);
   }
 
-  $('thresholdBtn').addEventListener('click', setThreshold);
-  $('thresholdInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') setThreshold();
+  $('attackBtn').addEventListener('click', () => setThresholdValue('attackInput', '/api/vad/attack_threshold'));
+  $('attackInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') setThresholdValue('attackInput', '/api/vad/attack_threshold');
+  });
+  $('sustainBtn').addEventListener('click', () => setThresholdValue('sustainInput', '/api/vad/sustain_threshold'));
+  $('sustainInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') setThresholdValue('sustainInput', '/api/vad/sustain_threshold');
   });
 })();
 </script>

@@ -22,7 +22,8 @@ chunk_ms = 20
 
 [vad]
 mode = "energy"
-threshold = 1000
+attack_threshold = 500
+sustain_threshold = 200
 silence_timeout_ms = 2500
 
 [[feedback]]

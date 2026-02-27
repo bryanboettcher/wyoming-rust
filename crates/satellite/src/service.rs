@@ -559,17 +559,23 @@ impl SatelliteService {
     ) {
         let mut d = diag.lock().unwrap();
 
-        // Apply pending threshold from HTTP API
-        if let Some(new_threshold) = d.pending_threshold.take() {
-            self.vad.set_threshold(new_threshold);
-            d.vad_threshold = Some(new_threshold);
-            log::info!("VAD threshold updated to {} via HTTP", new_threshold);
+        // Apply pending thresholds from HTTP API
+        if let Some(t) = d.pending_attack_threshold.take() {
+            self.vad.set_attack_threshold(t);
+            d.vad_attack_threshold = Some(t);
+            log::info!("VAD attack threshold updated to {} via HTTP", t);
+        }
+        if let Some(t) = d.pending_sustain_threshold.take() {
+            self.vad.set_sustain_threshold(t);
+            d.vad_sustain_threshold = Some(t);
+            log::info!("VAD sustain threshold updated to {} via HTTP", t);
         }
 
         d.state = state.clone();
         d.feedback_state = *feedback_state;
         d.connected = self.conn.is_some();
         d.vad_current_energy = self.vad.last_energy();
+        d.vad_phase = self.vad.phase().map(|s| s.to_string());
         if let Some(conn) = &self.conn {
             d.last_ping_received = conn.last_ping_received;
         }
@@ -640,9 +646,9 @@ fn create_vad(config: &Config) -> Result<Box<dyn Vad>, Box<dyn std::error::Error
                 }
             }
         }
-        VadConfig::Energy { threshold, .. } => {
-            log::info!("VAD mode: Energy (threshold {})", threshold);
-            Ok(Box::new(crate::hardware::EnergyVad::new(*threshold)))
+        VadConfig::Energy { attack_threshold, sustain_threshold, .. } => {
+            log::info!("VAD mode: Energy (attack={}, sustain={})", attack_threshold, sustain_threshold);
+            Ok(Box::new(crate::hardware::EnergyVad::new(*attack_threshold, *sustain_threshold)))
         }
     }
 }

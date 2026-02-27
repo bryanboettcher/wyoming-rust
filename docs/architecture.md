@@ -505,6 +505,13 @@ width = 2
 channels = 1
 chunk_ms = 20              # ~320 samples per frame
 
+[vad]
+mode = "energy"
+attack_threshold = 500       # RMS level to start streaming (onset detection)
+sustain_threshold = 200      # RMS level to keep streaming (quieter speech)
+silence_timeout_ms = 2500    # How long below sustain threshold before stopping
+buffer_seconds = 1.0         # Pre-roll ring buffer seconds
+
 [gpio]
 vad_pin = 17               # Schmitt trigger input
 silence_timeout_ms = 2500  # How long after GPIO low before stopping stream
@@ -518,6 +525,36 @@ method = "spi"             # "spi" or "pwm"
 # wav_input = "test.wav"
 # wav_output = "tts_output.wav"
 ```
+
+### Energy VAD: Schmitt Trigger
+
+The energy VAD uses a Schmitt trigger (hysteresis) with two thresholds to handle the
+natural dynamics of speech. A command like "ok nabu, turn on the lights" has a loud
+attack (~500 RMS) followed by quieter sustained speech (~300 RMS), with background
+noise at 50-150 RMS. A single threshold high enough to avoid false triggers would
+cut off the stream during quieter speech.
+
+**Phase lifecycle:**
+
+```
+reset() → attack phase
+  │
+  ├── RMS >= attack_threshold → poll() returns true, switch to sustain phase
+  │
+  └── sustain phase:
+        ├── RMS >= sustain_threshold → poll() returns true (stream stays alive)
+        └── RMS < sustain_threshold → poll() returns false (silence timer ticks)
+              └── silence_timeout_ms expires → state machine: Streaming → Idle
+                    └── reset() → back to attack phase
+```
+
+- `attack_threshold`: RMS energy level that triggers the onset of streaming. Set high
+  enough to avoid false triggers from background noise.
+- `sustain_threshold`: RMS energy level that keeps the stream alive during quieter speech.
+  Set above background noise but below normal speech. If omitted (0), defaults to
+  `attack_threshold / 2`.
+- The phase is tracked internally by `EnergyVad` — no changes to the state machine or
+  main loop are needed. The `Vad::phase()` method exposes the current phase for diagnostics.
 
 ## Testing Strategy
 

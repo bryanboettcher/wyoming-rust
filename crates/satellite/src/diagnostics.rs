@@ -22,10 +22,12 @@ pub struct DiagnosticsState {
     pub connected: bool,
     pub last_ping_received: Option<Instant>,
     pub vad_current_energy: Option<u16>,
+    pub vad_phase: Option<String>,
     pub interaction_count: u64,
 
     // ── Commands (written by HTTP thread, consumed by main loop) ───────
-    pub pending_threshold: Option<u16>,
+    pub pending_attack_threshold: Option<u16>,
+    pub pending_sustain_threshold: Option<u16>,
 
     // ── Static (set once at startup) ────────────────────────────────────
     started_at: Instant,
@@ -35,17 +37,29 @@ pub struct DiagnosticsState {
     audio_device: String,
     audio_format: String,
     vad_mode: String,
-    pub vad_threshold: Option<u16>,
+    pub vad_attack_threshold: Option<u16>,
+    pub vad_sustain_threshold: Option<u16>,
 }
 
 impl DiagnosticsState {
     pub fn new(config: &Config) -> Self {
         let now = Instant::now();
-        let (vad_mode, vad_threshold) = match &config.vad {
-            crate::config::VadConfig::AlwaysOn { .. } => ("always_on".into(), None),
-            crate::config::VadConfig::Gpio { pin, .. } => (format!("gpio(pin={})", pin), None),
-            crate::config::VadConfig::Energy { threshold, .. } => {
-                ("energy".into(), Some(*threshold))
+        let (vad_mode, vad_attack_threshold, vad_sustain_threshold) = match &config.vad {
+            crate::config::VadConfig::AlwaysOn { .. } => ("always_on".into(), None, None),
+            crate::config::VadConfig::Gpio { pin, .. } => {
+                (format!("gpio(pin={})", pin), None, None)
+            }
+            crate::config::VadConfig::Energy {
+                attack_threshold,
+                sustain_threshold,
+                ..
+            } => {
+                let effective_sustain = if *sustain_threshold == 0 {
+                    *attack_threshold / 2
+                } else {
+                    *sustain_threshold
+                };
+                ("energy".into(), Some(*attack_threshold), Some(effective_sustain))
             }
         };
         let audio_device = config
@@ -68,8 +82,10 @@ impl DiagnosticsState {
             connected: false,
             last_ping_received: None,
             vad_current_energy: None,
+            vad_phase: None,
             interaction_count: 0,
-            pending_threshold: None,
+            pending_attack_threshold: None,
+            pending_sustain_threshold: None,
             started_at: now,
             satellite_name: config.satellite.name.clone(),
             area: config.satellite.area.clone(),
@@ -77,13 +93,19 @@ impl DiagnosticsState {
             audio_device,
             audio_format,
             vad_mode,
-            vad_threshold,
+            vad_attack_threshold,
+            vad_sustain_threshold,
         }
     }
 
     /// Build a serializable snapshot on demand (only called on HTTP request).
     fn to_snapshot(&self) -> DiagnosticsSnapshot {
         let now = Instant::now();
+        // Determine the active threshold based on VAD phase
+        let active_threshold = match self.vad_phase.as_deref() {
+            Some("sustain") => self.vad_sustain_threshold,
+            _ => self.vad_attack_threshold,
+        };
         DiagnosticsSnapshot {
             state: format!("{:?}", self.state),
             feedback_state: format!("{:?}", self.feedback_state),
@@ -94,9 +116,11 @@ impl DiagnosticsState {
                 .last_ping_received
                 .map(|t| now.duration_since(t).as_secs_f64()),
             vad_mode: self.vad_mode.clone(),
-            vad_threshold: self.vad_threshold,
+            vad_attack_threshold: self.vad_attack_threshold,
+            vad_sustain_threshold: self.vad_sustain_threshold,
+            vad_phase: self.vad_phase.clone(),
             vad_current_energy: self.vad_current_energy,
-            vad_triggered: match (self.vad_current_energy, self.vad_threshold) {
+            vad_triggered: match (self.vad_current_energy, active_threshold) {
                 (Some(energy), Some(threshold)) => energy >= threshold,
                 _ => false,
             },
@@ -121,7 +145,9 @@ pub struct DiagnosticsSnapshot {
     pub server_address: String,
     pub last_ping_secs: Option<f64>,
     pub vad_mode: String,
-    pub vad_threshold: Option<u16>,
+    pub vad_attack_threshold: Option<u16>,
+    pub vad_sustain_threshold: Option<u16>,
+    pub vad_phase: Option<String>,
     pub vad_current_energy: Option<u16>,
     pub vad_triggered: bool,
     pub uptime_seconds: f64,
@@ -221,8 +247,11 @@ fn handle_request(
                 json
             )?;
         }
-        ("POST", "/vad/threshold") => {
-            handle_set_threshold(stream, &mut reader, diagnostics, content_length)?;
+        ("POST", "/vad/attack_threshold") => {
+            handle_set_threshold(stream, &mut reader, diagnostics, content_length, ThresholdKind::Attack)?;
+        }
+        ("POST", "/vad/sustain_threshold") => {
+            handle_set_threshold(stream, &mut reader, diagnostics, content_length, ThresholdKind::Sustain)?;
         }
         _ => {
             let body = "Not Found";
@@ -239,22 +268,36 @@ fn handle_request(
     Ok(())
 }
 
+enum ThresholdKind {
+    Attack,
+    Sustain,
+}
+
 fn handle_set_threshold(
     stream: &mut std::net::TcpStream,
     reader: &mut BufReader<std::net::TcpStream>,
     diagnostics: &SharedDiagnostics,
     content_length: usize,
+    kind: ThresholdKind,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Read request body
     let mut body = vec![0u8; content_length.min(64)];
     std::io::Read::read_exact(reader, &mut body)?;
     let body_str = String::from_utf8_lossy(&body);
 
+    let label = match kind {
+        ThresholdKind::Attack => "attack_threshold",
+        ThresholdKind::Sustain => "sustain_threshold",
+    };
+
     // Parse as u16 threshold
     let threshold: u16 = match body_str.trim().parse() {
         Ok(v) if v >= 1 => v,
         _ => {
-            let err = r#"{"error":"threshold must be an integer between 1 and 65535"}"#;
+            let err = format!(
+                r#"{{"error":"{} must be an integer between 1 and 65535"}}"#,
+                label
+            );
             write!(
                 stream,
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -265,10 +308,16 @@ fn handle_set_threshold(
         }
     };
 
-    diagnostics.lock().unwrap().pending_threshold = Some(threshold);
-    log::info!("Threshold update queued: {}", threshold);
+    {
+        let mut d = diagnostics.lock().unwrap();
+        match kind {
+            ThresholdKind::Attack => d.pending_attack_threshold = Some(threshold),
+            ThresholdKind::Sustain => d.pending_sustain_threshold = Some(threshold),
+        }
+    }
+    log::info!("{} update queued: {}", label, threshold);
 
-    let resp = format!(r#"{{"threshold":{}}}"#, threshold);
+    let resp = format!(r#"{{"{}":{}}}"#, label, threshold);
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -297,7 +346,8 @@ wav_input = "test.wav"
 
 [vad]
 mode = "energy"
-threshold = 1000
+attack_threshold = 1000
+sustain_threshold = 400
 "#;
         toml::from_str(toml).unwrap()
     }
@@ -315,7 +365,9 @@ threshold = 1000
         assert_eq!(snap.area.as_deref(), Some("Office"));
         assert_eq!(snap.server_address, "10.0.0.1:10700");
         assert_eq!(snap.vad_mode, "energy");
-        assert_eq!(snap.vad_threshold, Some(1000));
+        assert_eq!(snap.vad_attack_threshold, Some(1000));
+        assert_eq!(snap.vad_sustain_threshold, Some(400));
+        assert_eq!(snap.vad_phase, None);
         assert_eq!(snap.vad_current_energy, None);
         assert!(!snap.vad_triggered);
         assert_eq!(snap.interaction_count, 0);
@@ -340,7 +392,7 @@ threshold = 1000
         assert_eq!(snap.feedback_state, "Listening");
         assert!(snap.connected);
         assert_eq!(snap.vad_current_energy, Some(1500));
-        assert!(snap.vad_triggered); // 1500 >= 1000
+        assert!(snap.vad_triggered); // 1500 >= 1000 (attack threshold, phase is None/attack)
         assert_eq!(snap.interaction_count, 3);
     }
 
@@ -354,25 +406,29 @@ threshold = 1000
         // Verify key fields are present
         assert!(json.contains("\"state\":\"Idle\""));
         assert!(json.contains("\"satellite_name\":\"test-sat\""));
-        assert!(json.contains("\"vad_threshold\":1000"));
+        assert!(json.contains("\"vad_attack_threshold\":1000"));
+        assert!(json.contains("\"vad_sustain_threshold\":400"));
     }
 
     #[test]
-    fn vad_triggered_only_when_energy_exceeds_threshold() {
+    fn vad_triggered_uses_phase_appropriate_threshold() {
         let config = test_config();
         let mut state = DiagnosticsState::new(&config);
 
-        // Below threshold
+        // In attack phase (default): uses attack_threshold=1000
         state.vad_current_energy = Some(500);
         assert!(!state.to_snapshot().vad_triggered);
 
-        // At threshold
         state.vad_current_energy = Some(1000);
         assert!(state.to_snapshot().vad_triggered);
 
-        // Above threshold
-        state.vad_current_energy = Some(2000);
-        assert!(state.to_snapshot().vad_triggered);
+        // In sustain phase: uses sustain_threshold=400
+        state.vad_phase = Some("sustain".into());
+        state.vad_current_energy = Some(500);
+        assert!(state.to_snapshot().vad_triggered); // 500 >= 400
+
+        state.vad_current_energy = Some(300);
+        assert!(!state.to_snapshot().vad_triggered); // 300 < 400
 
         // No energy reading
         state.vad_current_energy = None;

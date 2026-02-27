@@ -139,7 +139,9 @@ pub enum VadConfig {
 
     #[serde(rename = "energy")]
     Energy {
-        threshold: u16,
+        attack_threshold: u16,
+        #[serde(default)]
+        sustain_threshold: u16,
         #[serde(default = "default_silence_timeout_ms")]
         silence_timeout_ms: u64,
         #[serde(default = "default_buffer_seconds")]
@@ -955,18 +957,46 @@ wav_input = "test.wav"
 
 [vad]
 mode = "energy"
-threshold = 1500
+attack_threshold = 500
+sustain_threshold = 200
 silence_timeout_ms = 2000
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         match &config.vad {
-            VadConfig::Energy { threshold, silence_timeout_ms, .. } => {
-                assert_eq!(*threshold, 1500);
+            VadConfig::Energy { attack_threshold, sustain_threshold, silence_timeout_ms, .. } => {
+                assert_eq!(*attack_threshold, 500);
+                assert_eq!(*sustain_threshold, 200);
                 assert_eq!(*silence_timeout_ms, 2000);
             }
             other => panic!("expected Energy VAD, got {:?}", other),
         }
         assert_eq!(config.vad.silence_timeout_ms(), 2000);
+    }
+
+    #[test]
+    fn vad_energy_sustain_defaults_to_zero() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[vad]
+mode = "energy"
+attack_threshold = 1000
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        match &config.vad {
+            VadConfig::Energy { attack_threshold, sustain_threshold, .. } => {
+                assert_eq!(*attack_threshold, 1000);
+                assert_eq!(*sustain_threshold, 0); // default, resolved to attack/2 at runtime
+            }
+            other => panic!("expected Energy VAD, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1000,7 +1030,8 @@ pin = 17
 
         // Energy defaults to 1.0
         let vad = VadConfig::Energy {
-            threshold: 1000,
+            attack_threshold: 1000,
+            sustain_threshold: 0,
             silence_timeout_ms: 2500,
             buffer_seconds: default_buffer_seconds(),
         };
@@ -1028,7 +1059,7 @@ wav_input = "test.wav"
 
 [vad]
 mode = "energy"
-threshold = 1500
+attack_threshold = 1500
 buffer_seconds = 2.5
 "#;
         let config: Config = toml::from_str(toml).unwrap();
@@ -1088,7 +1119,8 @@ buffer_seconds = 2.5
 
         // Energy variant: negative value rejected
         let cfg = make_config(VadConfig::Energy {
-            threshold: 1000,
+            attack_threshold: 1000,
+            sustain_threshold: 0,
             silence_timeout_ms: 2500,
             buffer_seconds: -0.5,
         });
@@ -1096,7 +1128,8 @@ buffer_seconds = 2.5
 
         // Energy variant: too large
         let cfg = make_config(VadConfig::Energy {
-            threshold: 1000,
+            attack_threshold: 1000,
+            sustain_threshold: 0,
             silence_timeout_ms: 2500,
             buffer_seconds: 99.0,
         });

@@ -10,9 +10,10 @@ use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
 use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError, HandshakeResult};
+use crate::diagnostics::SharedDiagnostics;
 use crate::feedback::{self, Feedback, FanoutFeedback};
 use crate::hardware::{AudioError, AudioSink, AudioSource, Vad};
-use crate::state::{Action, SatelliteInput, SatelliteState};
+use crate::state::{Action, FeedbackState, SatelliteInput, SatelliteState};
 
 /// How the satellite establishes its connection to HA.
 pub enum ConnectionMode {
@@ -171,6 +172,33 @@ impl SatelliteService {
         Ok(())
     }
 
+    /// Non-blocking poll for a server event, handling transport-level events
+    /// (ping/pong, describe) internally. Returns `Ok(Some(event))` only for
+    /// application-level events that the caller should process.
+    fn poll_server_event(&mut self) -> Result<Option<wyoming::event::Event>, ConnectionError> {
+        let conn = self.conn.as_mut().expect("no connection established");
+        let event = match conn.try_read_event()? {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+        conn.handle_transport_event(event, &self.sat_info, &self.mic_programs, &self.snd_programs)
+    }
+
+    /// Blocking read for a server event, handling transport-level events
+    /// (ping/pong, describe) internally. Returns `Ok(Some(event))` only for
+    /// application-level events. Loops internally if a transport event was handled.
+    fn read_server_event(&mut self) -> Result<Option<wyoming::event::Event>, ConnectionError> {
+        loop {
+            let conn = self.conn.as_mut().expect("no connection established");
+            let event = conn.read_event()?;
+            let conn = self.conn.as_mut().expect("no connection established");
+            match conn.handle_transport_event(event, &self.sat_info, &self.mic_programs, &self.snd_programs)? {
+                Some(event) => return Ok(Some(event)),
+                None => continue, // transport event handled, read next
+            }
+        }
+    }
+
     /// Intercept server events to capture playback format, then delegate to
     /// `map_server_event()` for state machine input mapping.
     fn handle_server_event(
@@ -206,8 +234,6 @@ impl SatelliteService {
         &mut self,
         state: &SatelliteState,
     ) -> Result<Option<SatelliteInput>, Box<dyn std::error::Error>> {
-        let conn = self.conn.as_mut().expect("no connection established");
-
         match state {
             // IDLE: either poll GPIO or read mic frames (depending on VAD mode)
             SatelliteState::Idle => {
@@ -255,7 +281,7 @@ impl SatelliteService {
                     }
 
                     // Check for server messages (non-blocking)
-                    match conn.try_read_event() {
+                    match self.poll_server_event() {
                         Ok(Some(event)) => {
                             if let Some(input) = self.handle_server_event(&event) {
                                 return Ok(Some(input));
@@ -281,7 +307,7 @@ impl SatelliteService {
                     std::thread::sleep(Duration::from_millis(100));
 
                     // Check for server messages (non-blocking)
-                    match conn.try_read_event() {
+                    match self.poll_server_event() {
                         Ok(Some(event)) => {
                             if let Some(input) = self.handle_server_event(&event) {
                                 return Ok(Some(input));
@@ -317,8 +343,13 @@ impl SatelliteService {
                         // In Triggered/Processing: audio exhausted but server is
                         // still working. Block on server socket instead.
                         log::debug!("Audio source exhausted, waiting for server response");
-                        let event = match conn.read_event() {
-                            Ok(e) => e,
+                        match self.read_server_event() {
+                            Ok(Some(event)) => {
+                                if let Some(input) = self.handle_server_event(&event) {
+                                    return Ok(Some(input));
+                                }
+                            }
+                            Ok(None) => {}
                             Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
                                 return Ok(Some(SatelliteInput::Disconnected))
                             }
@@ -326,9 +357,6 @@ impl SatelliteService {
                                 log::warn!("Error reading from server: {}", e);
                                 return Ok(Some(SatelliteInput::Disconnected));
                             }
-                        };
-                        if let Some(input) = self.handle_server_event(&event) {
-                            return Ok(Some(input));
                         }
                         return Ok(None);
                     }
@@ -355,11 +383,12 @@ impl SatelliteService {
                         audio: frame,
                         timestamp: None,
                     };
+                    let conn = self.conn.as_mut().expect("no connection established");
                     conn.send(chunk)?;
                 }
 
                 // 4. Check for server message (non-blocking)
-                match conn.try_read_event() {
+                match self.poll_server_event() {
                     Ok(Some(event)) => {
                         if let Some(input) = self.handle_server_event(&event) {
                             return Ok(Some(input));
@@ -380,8 +409,9 @@ impl SatelliteService {
 
             // RESPONDING: block on server socket for TTS audio
             SatelliteState::Responding => {
-                let event = match conn.read_event() {
-                    Ok(e) => e,
+                let event = match self.read_server_event() {
+                    Ok(Some(event)) => event,
+                    Ok(None) => return Ok(None), // transport event handled (e.g. ping)
                     Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
                         return Ok(Some(SatelliteInput::Disconnected));
                     }
@@ -515,6 +545,26 @@ impl SatelliteService {
             }
         }
         Ok(())
+    }
+
+    /// Update shared diagnostics with current service state.
+    ///
+    /// Copies a handful of scalars from the service into the mutex — no heap
+    /// allocation. Called once per main-loop tick.
+    pub fn update_diagnostics(
+        &self,
+        diag: &SharedDiagnostics,
+        state: &SatelliteState,
+        feedback_state: &FeedbackState,
+    ) {
+        let mut d = diag.lock().unwrap();
+        d.state = state.clone();
+        d.feedback_state = *feedback_state;
+        d.connected = self.conn.is_some();
+        d.vad_current_energy = self.vad.last_energy();
+        if let Some(conn) = &self.conn {
+            d.last_ping_received = conn.last_ping_received;
+        }
     }
 
     /// Cleanly shut down all feedback providers.

@@ -73,6 +73,12 @@ pub trait Vad {
 
     /// Reset internal state on return to Idle.
     fn reset(&mut self);
+
+    /// Returns the most recently computed energy level (RMS), if applicable.
+    /// Only meaningful for energy-based VAD; other modes return None.
+    fn last_energy(&self) -> Option<u16> {
+        None
+    }
 }
 
 // ============================================================================
@@ -342,12 +348,13 @@ impl Vad for GpioVad {
 /// Energy-based VAD. Computes RMS on PCM16LE frames and compares to threshold.
 pub struct EnergyVad {
     threshold: u16,
+    last_rms: u16,
 }
 
 impl EnergyVad {
     pub fn new(threshold: u16) -> Self {
         log::info!("Energy VAD initialized with threshold {}", threshold);
-        Self { threshold }
+        Self { threshold, last_rms: 0 }
     }
 
     /// Compute RMS (root mean square) of PCM16LE audio frame.
@@ -382,6 +389,7 @@ impl Vad for EnergyVad {
         match audio_frame {
             Some(frame) => {
                 let rms = Self::compute_rms(frame);
+                self.last_rms = rms;
                 rms >= self.threshold
             }
             None => {
@@ -396,7 +404,11 @@ impl Vad for EnergyVad {
     }
 
     fn reset(&mut self) {
-        // No state to reset (stateless threshold check)
+        self.last_rms = 0;
+    }
+
+    fn last_energy(&self) -> Option<u16> {
+        Some(self.last_rms)
     }
 }
 
@@ -461,6 +473,30 @@ mod tests {
     fn energy_vad_no_frame_returns_false() {
         let mut vad = EnergyVad::new(1000);
         assert!(!vad.poll(None));
+    }
+
+    #[test]
+    fn energy_vad_last_energy_tracks_rms() {
+        let mut vad = EnergyVad::new(1000);
+        assert_eq!(vad.last_energy(), Some(0));
+
+        // Poll with a loud frame
+        let mut loud = Vec::with_capacity(640);
+        for _ in 0..320 {
+            loud.extend_from_slice(&5000i16.to_le_bytes());
+        }
+        vad.poll(Some(&loud));
+        assert_eq!(vad.last_energy(), Some(5000));
+
+        // Reset clears it
+        vad.reset();
+        assert_eq!(vad.last_energy(), Some(0));
+    }
+
+    #[test]
+    fn always_on_vad_last_energy_none() {
+        let vad = AlwaysOnVad::new();
+        assert_eq!(vad.last_energy(), None);
     }
 
     #[test]

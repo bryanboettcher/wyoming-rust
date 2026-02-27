@@ -9,3 +9,4 @@ pub mod pipeline;
 pub mod timer;
 pub mod handle;
 pub mod intent;
+pub mod ping;

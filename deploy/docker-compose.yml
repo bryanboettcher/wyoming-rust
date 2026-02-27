@@ -14,6 +14,7 @@ services:
     container_name: wyoming-satellite
     ports:
       - "10700:10700"
+      - "8585:8585"
     environment:
       - RUST_LOG=info
     volumes:

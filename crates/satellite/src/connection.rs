@@ -1,11 +1,12 @@
 use std::io::{BufReader, BufWriter};
 use std::net::TcpStream;
 use std::os::unix::io::AsRawFd;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 use wyoming::event::{self, Event, Eventable, ProtocolError};
 use wyoming::info::{Describe, Info, MicProgram, SatelliteInfo, SndProgram};
+use wyoming::ping::{Ping, Pong};
 use wyoming::satellite::RunSatellite;
 
 use crate::config::ServerConfig;
@@ -48,6 +49,8 @@ pub enum HandshakeResult {
 pub struct Connection {
     reader: BufReader<TcpStream>,
     writer: BufWriter<TcpStream>,
+    /// Timestamp of the most recent ping received from the server.
+    pub last_ping_received: Option<Instant>,
 }
 
 impl Connection {
@@ -73,7 +76,7 @@ impl Connection {
 
         let reader = BufReader::new(stream.try_clone()?);
         let writer = BufWriter::new(stream);
-        let mut conn = Self { reader, writer };
+        let mut conn = Self { reader, writer, last_ping_received: None };
 
         let result = conn.handle_handshake(sat_info, mic_programs, snd_programs)?;
 
@@ -97,7 +100,7 @@ impl Connection {
 
         let reader = BufReader::new(stream.try_clone()?);
         let writer = BufWriter::new(stream);
-        let mut conn = Self { reader, writer };
+        let mut conn = Self { reader, writer, last_ping_received: None };
 
         let result = conn.handle_handshake(sat_info, mic_programs, snd_programs)?;
 
@@ -197,6 +200,48 @@ impl Connection {
         let event = event::read_event(&mut self.reader)?;
         log::trace!("Received (non-blocking): {}", event.event_type);
         Ok(Some(event))
+    }
+
+    /// Handle transport-level protocol events (ping/pong, describe) that
+    /// require an immediate reply and should not reach the state machine.
+    ///
+    /// Returns `Some(event)` for application-level events that the caller
+    /// should process. Returns `None` if the event was handled internally
+    /// (caller should continue polling).
+    pub fn handle_transport_event(
+        &mut self,
+        event: Event,
+        sat_info: &SatelliteInfo,
+        mic_programs: &[MicProgram],
+        snd_programs: &[SndProgram],
+    ) -> Result<Option<Event>, ConnectionError> {
+        match event.event_type.as_str() {
+            "ping" => {
+                let ping = Ping::from_event(event).map_err(|e| {
+                    ConnectionError::Protocol(ProtocolError::InvalidHeader(e.to_string()))
+                })?;
+                log::debug!("Ping received, sending pong (text={:?})", ping.text);
+                self.last_ping_received = Some(Instant::now());
+                self.send(Pong { text: ping.text })?;
+                Ok(None)
+            }
+            "describe" => {
+                log::debug!("Describe received in main loop, sending info");
+                let info = Info {
+                    satellite: Some(sat_info.clone()),
+                    asr: vec![],
+                    tts: vec![],
+                    handle: vec![],
+                    intent: vec![],
+                    wake: vec![],
+                    mic: mic_programs.to_vec(),
+                    snd: snd_programs.to_vec(),
+                };
+                self.send(info)?;
+                Ok(None)
+            }
+            _ => Ok(Some(event)),
+        }
     }
 
     /// Check if the underlying socket has data available to read,

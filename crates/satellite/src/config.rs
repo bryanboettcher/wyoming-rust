@@ -23,6 +23,8 @@ pub struct Config {
     pub vad: VadConfig,
     #[serde(default)]
     pub feedback: Vec<FeedbackProviderConfig>,
+    #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,6 +183,42 @@ fn default_silence_timeout_ms() -> u64 {
 
 fn default_buffer_seconds() -> f64 {
     1.0
+}
+
+// ============================================================================
+// Diagnostics / Health-Check Configuration
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiagnosticsConfig {
+    #[serde(default = "default_diagnostics_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_diagnostics_port")]
+    pub port: u16,
+    #[serde(default = "default_diagnostics_bind")]
+    pub bind: String,
+}
+
+fn default_diagnostics_enabled() -> bool {
+    true
+}
+
+fn default_diagnostics_port() -> u16 {
+    8585
+}
+
+fn default_diagnostics_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_diagnostics_enabled(),
+            port: default_diagnostics_port(),
+            bind: default_diagnostics_bind(),
+        }
+    }
 }
 
 // ============================================================================
@@ -1016,6 +1054,7 @@ buffer_seconds = 2.5
                 },
                 vad,
                 feedback: vec![],
+                diagnostics: DiagnosticsConfig::default(),
             }
         }
 
@@ -1081,5 +1120,67 @@ mode = "invalid_mode"
 "#;
         let result: Result<Config, _> = toml::from_str(toml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn diagnostics_defaults_when_section_omitted() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.diagnostics.enabled);
+        assert_eq!(config.diagnostics.port, 8585);
+        assert_eq!(config.diagnostics.bind, "0.0.0.0");
+    }
+
+    #[test]
+    fn diagnostics_explicit_config() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[diagnostics]
+enabled = false
+port = 9090
+bind = "127.0.0.1"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(!config.diagnostics.enabled);
+        assert_eq!(config.diagnostics.port, 9090);
+        assert_eq!(config.diagnostics.bind, "127.0.0.1");
+    }
+
+    #[test]
+    fn diagnostics_partial_config() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[diagnostics]
+port = 3000
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.diagnostics.enabled); // default
+        assert_eq!(config.diagnostics.port, 3000);
+        assert_eq!(config.diagnostics.bind, "0.0.0.0"); // default
     }
 }

@@ -79,6 +79,14 @@ pub trait Vad {
     fn last_energy(&self) -> Option<u16> {
         None
     }
+
+    /// Returns the current threshold, if applicable.
+    fn threshold(&self) -> Option<u16> {
+        None
+    }
+
+    /// Update the threshold at runtime. No-op for modes without a threshold.
+    fn set_threshold(&mut self, _threshold: u16) {}
 }
 
 // ============================================================================
@@ -410,6 +418,14 @@ impl Vad for EnergyVad {
     fn last_energy(&self) -> Option<u16> {
         Some(self.last_rms)
     }
+
+    fn threshold(&self) -> Option<u16> {
+        Some(self.threshold)
+    }
+
+    fn set_threshold(&mut self, threshold: u16) {
+        self.threshold = threshold;
+    }
 }
 
 #[cfg(test)]
@@ -497,6 +513,32 @@ mod tests {
     fn always_on_vad_last_energy_none() {
         let vad = AlwaysOnVad::new();
         assert_eq!(vad.last_energy(), None);
+    }
+
+    #[test]
+    fn energy_vad_set_threshold() {
+        let mut vad = EnergyVad::new(5000);
+        assert_eq!(vad.threshold(), Some(5000));
+
+        // Frame at RMS 3000 — below initial threshold
+        let mut frame = Vec::with_capacity(640);
+        for _ in 0..320 {
+            frame.extend_from_slice(&3000i16.to_le_bytes());
+        }
+        assert!(!vad.poll(Some(&frame)));
+
+        // Lower threshold — same frame should now trigger
+        vad.set_threshold(2000);
+        assert_eq!(vad.threshold(), Some(2000));
+        assert!(vad.poll(Some(&frame)));
+    }
+
+    #[test]
+    fn always_on_vad_threshold_none() {
+        let mut vad = AlwaysOnVad::new();
+        assert_eq!(vad.threshold(), None);
+        vad.set_threshold(1000); // no-op
+        assert_eq!(vad.threshold(), None);
     }
 
     #[test]

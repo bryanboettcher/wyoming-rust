@@ -24,6 +24,9 @@ pub struct DiagnosticsState {
     pub vad_current_energy: Option<u16>,
     pub interaction_count: u64,
 
+    // ── Commands (written by HTTP thread, consumed by main loop) ───────
+    pub pending_threshold: Option<u16>,
+
     // ── Static (set once at startup) ────────────────────────────────────
     started_at: Instant,
     satellite_name: String,
@@ -32,7 +35,7 @@ pub struct DiagnosticsState {
     audio_device: String,
     audio_format: String,
     vad_mode: String,
-    vad_threshold: Option<u16>,
+    pub vad_threshold: Option<u16>,
 }
 
 impl DiagnosticsState {
@@ -66,6 +69,7 @@ impl DiagnosticsState {
             last_ping_received: None,
             vad_current_energy: None,
             interaction_count: 0,
+            pending_threshold: None,
             started_at: now,
             satellite_name: config.satellite.name.clone(),
             area: config.satellite.area.clone(),
@@ -169,22 +173,30 @@ fn handle_request(
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
 
-    // Consume remaining headers
+    // Parse method and path from request line (e.g. "POST /vad/threshold HTTP/1.1")
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET");
+    let path = parts.next().unwrap_or("/");
+
+    // Consume remaining headers, capture Content-Length
+    let mut content_length: usize = 0;
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         if line == "\r\n" || line.is_empty() {
             break;
         }
+        if let Some(val) = line.strip_prefix("Content-Length:") {
+            content_length = val.trim().parse().unwrap_or(0);
+        }
+        // Case-insensitive fallback
+        if let Some(val) = line.strip_prefix("content-length:") {
+            content_length = val.trim().parse().unwrap_or(0);
+        }
     }
 
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("/");
-
-    match path {
-        "/health" => {
+    match (method, path) {
+        ("GET", "/health") => {
             let connected = diagnostics.lock().unwrap().connected;
             let (status, body) = if connected {
                 ("200 OK", "healthy")
@@ -199,7 +211,7 @@ fn handle_request(
                 body
             )?;
         }
-        "/" => {
+        ("GET", "/") => {
             let snapshot = diagnostics.lock().unwrap().to_snapshot();
             let json = serde_json::to_string_pretty(&snapshot)?;
             write!(
@@ -208,6 +220,9 @@ fn handle_request(
                 json.len(),
                 json
             )?;
+        }
+        ("POST", "/vad/threshold") => {
+            handle_set_threshold(stream, &mut reader, diagnostics, content_length)?;
         }
         _ => {
             let body = "Not Found";
@@ -221,6 +236,45 @@ fn handle_request(
     }
 
     stream.flush()?;
+    Ok(())
+}
+
+fn handle_set_threshold(
+    stream: &mut std::net::TcpStream,
+    reader: &mut BufReader<std::net::TcpStream>,
+    diagnostics: &SharedDiagnostics,
+    content_length: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Read request body
+    let mut body = vec![0u8; content_length.min(64)];
+    std::io::Read::read_exact(reader, &mut body)?;
+    let body_str = String::from_utf8_lossy(&body);
+
+    // Parse as u16 threshold
+    let threshold: u16 = match body_str.trim().parse() {
+        Ok(v) if v >= 1 => v,
+        _ => {
+            let err = r#"{"error":"threshold must be an integer between 1 and 65535"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                err.len(),
+                err
+            )?;
+            return Ok(());
+        }
+    };
+
+    diagnostics.lock().unwrap().pending_threshold = Some(threshold);
+    log::info!("Threshold update queued: {}", threshold);
+
+    let resp = format!(r#"{{"threshold":{}}}"#, threshold);
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        resp.len(),
+        resp
+    )?;
     Ok(())
 }
 

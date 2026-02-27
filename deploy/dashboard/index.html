@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wyoming Satellite</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f8f9fa;
+  --surface: #ffffff;
+  --border: #e2e5e9;
+  --text: #2c3e50;
+  --text-muted: #7f8c97;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  --green: #27ae60;
+  --red: #c0392b;
+  --amber: #e67e22;
+  --blue: #2980b9;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  padding: 1rem;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+header {
+  margin-bottom: 1.25rem;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+header .subtitle {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.875rem 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.card-title {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.2rem 0;
+}
+
+.label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.value {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.dot-green { background: var(--green); }
+.dot-red { background: var(--red); }
+.dot-amber { background: var(--amber); }
+.dot-blue { background: var(--blue); }
+
+.state-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 4px;
+  background: #eef1f5;
+  color: var(--text);
+}
+
+.state-badge.idle { background: #eef1f5; color: #5a6a7a; }
+.state-badge.streaming { background: #e8f5e9; color: #2e7d32; }
+.state-badge.processing { background: #fff3e0; color: #e65100; }
+.state-badge.responding { background: #e3f2fd; color: #1565c0; }
+
+.sparkline-wrap {
+  margin-top: 0.5rem;
+  position: relative;
+}
+
+.sparkline-wrap canvas {
+  width: 100%;
+  height: 56px;
+  display: block;
+  border-radius: 4px;
+  background: #f4f6f8;
+}
+
+.history-list {
+  list-style: none;
+  max-height: 160px;
+  overflow-y: auto;
+  font-size: 0.75rem;
+}
+
+.history-list li {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.2rem 0;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+}
+
+.history-list li:last-child { border-bottom: none; }
+.history-list .ts { color: var(--text-muted); }
+
+.banner {
+  display: none;
+  background: var(--red);
+  color: #fff;
+  text-align: center;
+  padding: 0.4rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  margin-bottom: 0.75rem;
+}
+
+.banner.visible { display: block; }
+
+.threshold-control {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.threshold-control input {
+  width: 5rem;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  text-align: right;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.threshold-control input:focus {
+  outline: none;
+  border-color: var(--blue);
+}
+
+.threshold-control button {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.threshold-control button:hover {
+  background: var(--bg);
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.threshold-control .flash-ok { animation: flashGreen 0.6s; }
+.threshold-control .flash-err { animation: flashRed 0.6s; }
+
+@keyframes flashGreen {
+  0%, 100% { border-color: var(--border); }
+  30% { border-color: var(--green); }
+}
+@keyframes flashRed {
+  0%, 100% { border-color: var(--border); }
+  30% { border-color: var(--red); }
+}
+</style>
+</head>
+<body>
+
+<div id="banner" class="banner">Dashboard disconnected — retrying&hellip;</div>
+
+<header>
+  <h1>
+    <span class="dot dot-red" id="connDot"></span>
+    <span id="satName">Wyoming Satellite</span>
+  </h1>
+  <div class="subtitle">
+    <span id="area"></span>
+    <span id="uptime"></span>
+  </div>
+</header>
+
+<div class="card">
+  <div class="card-title">Connection</div>
+  <div class="row">
+    <span class="label">Status</span>
+    <span class="value" id="connStatus">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Server</span>
+    <span class="value" id="serverAddr">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Last Ping</span>
+    <span class="value" id="lastPing">—</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">State Machine</div>
+  <div class="row">
+    <span class="label">State</span>
+    <span class="state-badge idle" id="stateBadge">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Feedback</span>
+    <span class="value" id="feedbackState">—</span>
+  </div>
+  <div class="row">
+    <span class="label">In state for</span>
+    <span class="value" id="stateAge">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Interactions</span>
+    <span class="value" id="interactions">0</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Voice Activity Detection</div>
+  <div class="row">
+    <span class="label">Mode</span>
+    <span class="value" id="vadMode">—</span>
+  </div>
+  <div class="row" id="thresholdRow">
+    <span class="label">Threshold</span>
+    <span class="value" id="vadThreshold">—</span>
+    <span class="threshold-control" id="thresholdControl" style="display:none">
+      <input type="number" id="thresholdInput" min="1" max="65535" placeholder="value">
+      <button id="thresholdBtn">Set</button>
+    </span>
+  </div>
+  <div class="row">
+    <span class="label">Energy</span>
+    <span class="value" id="vadEnergy">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Triggered</span>
+    <span class="value" id="vadTriggered">—</span>
+  </div>
+  <div class="sparkline-wrap">
+    <canvas id="sparkline"></canvas>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">Audio</div>
+  <div class="row">
+    <span class="label">Device</span>
+    <span class="value" id="audioDevice">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Format</span>
+    <span class="value" id="audioFormat">—</span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-title">State History</div>
+  <ul class="history-list" id="stateHistory">
+    <li><span class="ts">waiting for data&hellip;</span></li>
+  </ul>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  const POLL_MS = 1000;
+  const MAX_SAMPLES = 120;
+
+  // Ring buffer for energy sparkline
+  const energyHistory = [];
+  // State change log
+  const stateLog = [];
+  let lastState = null;
+  let threshold = null;
+  let consecutiveErrors = 0;
+
+  // DOM refs
+  const $ = id => document.getElementById(id);
+
+  function formatDuration(secs) {
+    if (secs == null) return '—';
+    if (secs < 1) return '<1s';
+    if (secs < 60) return Math.floor(secs) + 's';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    if (m < 60) return m + 'm ' + s + 's';
+    const h = Math.floor(m / 60);
+    return h + 'h ' + (m % 60) + 'm';
+  }
+
+  function formatAgo(secs) {
+    if (secs == null) return '—';
+    return formatDuration(secs) + ' ago';
+  }
+
+  function stateClass(s) {
+    const lower = (s || '').toLowerCase();
+    if (lower === 'idle') return 'idle';
+    if (lower === 'streaming') return 'streaming';
+    if (lower === 'processing') return 'processing';
+    if (lower === 'responding') return 'responding';
+    return 'idle';
+  }
+
+  function timeStr() {
+    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+
+  function drawSparkline() {
+    const canvas = $('sparkline');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const w = rect.width;
+    const h = rect.height;
+
+    ctx.clearRect(0, 0, w, h);
+
+    if (energyHistory.length < 2) return;
+
+    // Determine Y scale: max of threshold or highest energy, with padding
+    const maxEnergy = Math.max(...energyHistory, threshold || 0);
+    const yMax = Math.max(maxEnergy * 1.15, 100);
+    const pad = 4;
+
+    // Draw threshold line
+    if (threshold != null) {
+      const ty = h - pad - ((threshold / yMax) * (h - pad * 2));
+      ctx.strokeStyle = '#c0392b44';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(0, ty);
+      ctx.lineTo(w, ty);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Label
+      ctx.fillStyle = '#c0392b88';
+      ctx.font = '9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+      ctx.fillText('threshold', 3, ty - 3);
+    }
+
+    // Draw energy line
+    ctx.strokeStyle = '#2980b9';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const step = w / (MAX_SAMPLES - 1);
+    const offset = MAX_SAMPLES - energyHistory.length;
+    for (let i = 0; i < energyHistory.length; i++) {
+      const x = (offset + i) * step;
+      const y = h - pad - ((energyHistory[i] / yMax) * (h - pad * 2));
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  function update(data) {
+    consecutiveErrors = 0;
+    $('banner').classList.remove('visible');
+
+    // Header
+    $('satName').textContent = data.satellite_name || 'Wyoming Satellite';
+    const parts = [];
+    if (data.area) parts.push(data.area);
+    parts.push('up ' + formatDuration(data.uptime_seconds));
+    $('area').textContent = parts.join(' · ');
+
+    // Connection
+    const dot = $('connDot');
+    dot.className = 'dot ' + (data.connected ? 'dot-green' : 'dot-red');
+    $('connStatus').textContent = data.connected ? 'Connected' : 'Disconnected';
+    $('serverAddr').textContent = data.server_address || '—';
+    $('lastPing').textContent = formatAgo(data.last_ping_secs);
+
+    // State
+    const badge = $('stateBadge');
+    badge.textContent = data.state || '—';
+    badge.className = 'state-badge ' + stateClass(data.state);
+    $('feedbackState').textContent = data.feedback_state || '—';
+    $('stateAge').textContent = formatDuration(data.last_state_change_secs);
+    $('interactions').textContent = data.interaction_count != null ? data.interaction_count : '—';
+
+    // VAD
+    $('vadMode').textContent = data.vad_mode || '—';
+    threshold = data.vad_threshold;
+    $('vadThreshold').textContent = threshold != null ? threshold : '—';
+    // Show threshold control only for energy VAD
+    $('thresholdControl').style.display = data.vad_mode === 'energy' ? '' : 'none';
+    const energy = data.vad_current_energy;
+    $('vadEnergy').textContent = energy != null ? energy : '—';
+    const triggered = $('vadTriggered');
+    if (data.vad_triggered) {
+      triggered.innerHTML = '<span class="dot dot-amber"></span>Yes';
+    } else {
+      triggered.textContent = 'No';
+    }
+
+    // Energy history
+    energyHistory.push(energy != null ? energy : 0);
+    if (energyHistory.length > MAX_SAMPLES) energyHistory.shift();
+    drawSparkline();
+
+    // Audio
+    $('audioDevice').textContent = data.audio_device || '—';
+    $('audioFormat').textContent = data.audio_format || '—';
+
+    // State history
+    if (data.state && data.state !== lastState) {
+      stateLog.unshift({ time: timeStr(), from: lastState, to: data.state });
+      if (stateLog.length > 30) stateLog.pop();
+      renderHistory();
+      lastState = data.state;
+    }
+    if (lastState === null) lastState = data.state;
+  }
+
+  function renderHistory() {
+    const ul = $('stateHistory');
+    if (stateLog.length === 0) {
+      ul.innerHTML = '<li><span class="ts">no transitions yet</span></li>';
+      return;
+    }
+    ul.innerHTML = stateLog.map(e =>
+      '<li><span class="ts">' + e.time + '</span><span>' +
+      (e.from || '?') + ' → ' + e.to + '</span></li>'
+    ).join('');
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/');
+      if (!res.ok) throw new Error(res.status);
+      const data = await res.json();
+      update(data);
+    } catch (err) {
+      consecutiveErrors++;
+      if (consecutiveErrors >= 3) {
+        $('banner').classList.add('visible');
+      }
+    }
+  }
+
+  // Start polling
+  poll();
+  setInterval(poll, POLL_MS);
+
+  // Redraw sparkline on resize
+  window.addEventListener('resize', drawSparkline);
+
+  // Threshold tuning
+  async function setThreshold() {
+    const input = $('thresholdInput');
+    const val = parseInt(input.value, 10);
+    if (!val || val < 1 || val > 65535) {
+      flash(input, 'flash-err');
+      return;
+    }
+    try {
+      const res = await fetch('/api/vad/threshold', { method: 'POST', body: String(val) });
+      if (!res.ok) throw new Error(res.status);
+      flash(input, 'flash-ok');
+      input.value = '';
+    } catch (err) {
+      flash(input, 'flash-err');
+    }
+  }
+
+  function flash(el, cls) {
+    el.classList.remove('flash-ok', 'flash-err');
+    void el.offsetWidth; // force reflow to restart animation
+    el.classList.add(cls);
+  }
+
+  $('thresholdBtn').addEventListener('click', setThreshold);
+  $('thresholdInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') setThreshold();
+  });
+})();
+</script>
+</body>
+</html>

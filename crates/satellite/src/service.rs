@@ -552,12 +552,20 @@ impl SatelliteService {
     /// Copies a handful of scalars from the service into the mutex — no heap
     /// allocation. Called once per main-loop tick.
     pub fn update_diagnostics(
-        &self,
+        &mut self,
         diag: &SharedDiagnostics,
         state: &SatelliteState,
         feedback_state: &FeedbackState,
     ) {
         let mut d = diag.lock().unwrap();
+
+        // Apply pending threshold from HTTP API
+        if let Some(new_threshold) = d.pending_threshold.take() {
+            self.vad.set_threshold(new_threshold);
+            d.vad_threshold = Some(new_threshold);
+            log::info!("VAD threshold updated to {} via HTTP", new_threshold);
+        }
+
         d.state = state.clone();
         d.feedback_state = *feedback_state;
         d.connected = self.conn.is_some();

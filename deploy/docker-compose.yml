@@ -10,7 +10,8 @@
 
 services:
   satellite:
-    image: ghcr.io/bryanboettcher/wyoming-rust:latest
+    image: ghcr.io/bryanboettcher/wyoming-rust:armv6
+    platform: linux/arm/v7
     container_name: wyoming-satellite
     ports:
       - "10700:10700"
@@ -22,6 +23,29 @@ services:
     devices:
       - /dev/snd:/dev/snd
     command: ["/data/satellite.toml"]
+    # Override Dockerfile HEALTHCHECK: the ARMv6 runtime library overlay replaces
+    # glibc 2.36 with 2.31, which breaks /bin/sh (and thus wget). Use the
+    # dashboard service's health check to proxy-verify satellite liveness instead.
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  dashboard:
+    image: nginx:alpine
+    container_name: wyoming-dashboard
+    ports:
+      - "8080:80"
+    volumes:
+      - ./dashboard/index.html:/usr/share/nginx/html/index.html:ro
+      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - satellite
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/api/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
     restart: unless-stopped
 
   avahi:

@@ -25,6 +25,8 @@ pub struct Config {
     pub feedback: Vec<FeedbackProviderConfig>,
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
+    #[serde(default)]
+    pub pipeline: PipelineConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -185,6 +187,116 @@ fn default_silence_timeout_ms() -> u64 {
 
 fn default_buffer_seconds() -> f64 {
     1.0
+}
+
+// ============================================================================
+// Audio Processing Pipeline Configuration
+// ============================================================================
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PipelineConfig {
+    /// Master switch. When false (default), no pipeline stages are created
+    /// and audio passes through unmodified with zero overhead.
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default)]
+    pub highpass: Option<HighPassConfig>,
+
+    #[serde(default)]
+    pub gate: Option<GateConfig>,
+
+    #[serde(default)]
+    pub agc: Option<AgcConfig>,
+
+    /// How often analyze() runs on each stage (in frames). Default 50 = 1 second at 20ms.
+    #[serde(default = "default_analyze_interval")]
+    pub analyze_interval: u64,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            highpass: None,
+            gate: None,
+            agc: None,
+            analyze_interval: default_analyze_interval(),
+        }
+    }
+}
+
+fn default_analyze_interval() -> u64 {
+    50
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct HighPassConfig {
+    #[serde(default = "default_hpf_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_hpf_cutoff")]
+    pub cutoff_hz: f32,
+}
+
+fn default_hpf_enabled() -> bool {
+    true
+}
+
+fn default_hpf_cutoff() -> f32 {
+    85.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateConfig {
+    #[serde(default = "default_gate_enabled")]
+    pub enabled: bool,
+    /// RMS threshold to open gate. 0 = auto (analyzer sets from noise floor).
+    #[serde(default)]
+    pub threshold: u16,
+    #[serde(default = "default_gate_attack_ms")]
+    pub attack_ms: f32,
+    #[serde(default = "default_gate_release_ms")]
+    pub release_ms: f32,
+}
+
+fn default_gate_enabled() -> bool {
+    true
+}
+
+fn default_gate_attack_ms() -> f32 {
+    1.0
+}
+
+fn default_gate_release_ms() -> f32 {
+    50.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgcConfig {
+    #[serde(default = "default_agc_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_agc_target_rms")]
+    pub target_rms: f32,
+    #[serde(default = "default_agc_max_gain")]
+    pub max_gain: f32,
+    #[serde(default = "default_agc_min_gain")]
+    pub min_gain: f32,
+}
+
+fn default_agc_enabled() -> bool {
+    true
+}
+
+fn default_agc_target_rms() -> f32 {
+    3000.0
+}
+
+fn default_agc_max_gain() -> f32 {
+    10.0
+}
+
+fn default_agc_min_gain() -> f32 {
+    0.1
 }
 
 // ============================================================================
@@ -1086,6 +1198,7 @@ buffer_seconds = 2.5
                 vad,
                 feedback: vec![],
                 diagnostics: DiagnosticsConfig::default(),
+                pipeline: PipelineConfig::default(),
             }
         }
 

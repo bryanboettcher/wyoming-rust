@@ -3,6 +3,7 @@ mod connection;
 mod diagnostics;
 mod feedback;
 mod hardware;
+mod pipeline;
 mod service;
 mod state;
 

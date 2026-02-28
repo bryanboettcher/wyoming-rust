@@ -9,6 +9,7 @@ use wyoming::pipeline::{PipelineStage, RunPipeline};
 use wyoming::satellite::{Played, StreamingStarted, StreamingStopped};
 
 use crate::config::Config;
+use crate::pipeline;
 use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError, HandshakeResult};
 use crate::diagnostics::{push_sse, SharedDiagnostics, SseClients};
 use crate::feedback::{self, Feedback, FanoutFeedback};
@@ -54,6 +55,8 @@ pub struct SatelliteService {
     /// Timestamp set right after read_frame() returns (or at next_input() entry for
     /// non-audio states). Used by update_diagnostics() to compute non-ALSA work time.
     tick_post_read: Instant,
+    runner: Box<dyn pipeline::Runner>,
+    sample_buf: Vec<i16>,
 }
 
 impl SatelliteService {
@@ -144,6 +147,8 @@ impl SatelliteService {
             config: config.clone(),
             sse_clients: None,
             tick_post_read: Instant::now(),
+            runner: Box::new(pipeline::SimpleRunner::new(&config.pipeline, config.audio.rate)),
+            sample_buf: Vec::new(),
         })
     }
 
@@ -278,8 +283,16 @@ impl SatelliteService {
 
                     // Read a frame, poll VAD first (borrow), then move into pre-roll buffer
                     match self.mic.read_frame() {
-                        Ok(frame) => {
+                        Ok(mut frame) => {
                             self.tick_post_read = Instant::now();
+
+                            // Apply audio pipeline before VAD
+                            if self.runner.is_active() {
+                                pipeline::pcm16le_to_samples(&frame, &mut self.sample_buf);
+                                self.runner.process_frame(&mut self.sample_buf);
+                                pipeline::samples_to_pcm16le(&self.sample_buf, &mut frame);
+                            }
+
                             // Poll VAD before buffering so we can borrow frame without cloning
                             if self.vad.poll(Some(&frame)) {
                                 self.last_vad_active = Instant::now();
@@ -362,8 +375,16 @@ impl SatelliteService {
             | SatelliteState::Processing => {
                 // 1. Read one mic frame (~20ms block)
                 let frame = match self.mic.read_frame() {
-                    Ok(f) => {
+                    Ok(mut f) => {
                         self.tick_post_read = Instant::now();
+
+                        // Apply audio pipeline (HPF, gate, AGC) before VAD
+                        if self.runner.is_active() {
+                            pipeline::pcm16le_to_samples(&f, &mut self.sample_buf);
+                            self.runner.process_frame(&mut self.sample_buf);
+                            pipeline::samples_to_pcm16le(&self.sample_buf, &mut f);
+                        }
+
                         Some(f)
                     }
                     Err(AudioError::EndOfStream) => {
@@ -625,8 +646,19 @@ impl SatelliteService {
                 _ => false,
             };
             let work_us = self.tick_post_read.elapsed().as_micros() as u32;
+            let pipeline_stats = if self.runner.is_active() {
+                let snapshot = self.runner.stats_snapshot();
+                let mut s = String::new();
+                for &(stage_name, key, val) in &snapshot.entries {
+                    use std::fmt::Write;
+                    write!(s, r#","{}.{}":{:.4}"#, stage_name, key.name(), val).ok();
+                }
+                s
+            } else {
+                String::new()
+            };
             let json = format!(
-                r#"{{"energy":{},"phase":"{}","state":"{:?}","feedback":"{:?}","triggered":{},"connected":{},"work_us":{}}}"#,
+                r#"{{"energy":{},"phase":"{}","state":"{:?}","feedback":"{:?}","triggered":{},"connected":{},"work_us":{}{}}}"#,
                 energy.map(|e| e.to_string()).unwrap_or_else(|| "null".into()),
                 phase,
                 state,
@@ -634,6 +666,7 @@ impl SatelliteService {
                 triggered,
                 d.connected,
                 work_us,
+                pipeline_stats,
             );
             push_sse(clients, "tick", &json);
         }

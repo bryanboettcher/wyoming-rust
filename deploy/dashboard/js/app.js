@@ -18,6 +18,8 @@ let attackThreshold = null;
 let sustainThreshold = null;
 const energyHistory = [];
 const stateLog = [];
+const workUsHistory = [];  // rolling window for timing stats
+const WORK_HISTORY_SIZE = 50;
 let lastState = null;
 let sparklineDirty = false;
 
@@ -150,6 +152,18 @@ function handleTick(data) {
     lastState = state;
   }
   if (lastState === null) lastState = state;
+
+  // Frame timing
+  if (data.work_us != null) {
+    workUsHistory.push(data.work_us);
+    if (workUsHistory.length > WORK_HISTORY_SIZE) workUsHistory.shift();
+    $('workCurrent').textContent = data.work_us + '\u00b5s';
+    const avg = Math.round(workUsHistory.reduce((a, b) => a + b, 0) / workUsHistory.length);
+    const max = Math.max(...workUsHistory);
+    $('workAvg').textContent = avg + '\u00b5s';
+    $('workMax').textContent = max + '\u00b5s';
+    $('workHeadroom').textContent = ((20000 - avg) / 1000).toFixed(1) + 'ms / 20ms';
+  }
 
   scheduleSparkline();
 }

@@ -51,6 +51,9 @@ pub struct SatelliteService {
     config: Config,
     /// SSE client registry for real-time streaming of tick data and protocol events.
     sse_clients: Option<SseClients>,
+    /// Timestamp set right after read_frame() returns (or at next_input() entry for
+    /// non-audio states). Used by update_diagnostics() to compute non-ALSA work time.
+    tick_post_read: Instant,
 }
 
 impl SatelliteService {
@@ -140,6 +143,7 @@ impl SatelliteService {
             preroll_max_frames,
             config: config.clone(),
             sse_clients: None,
+            tick_post_read: Instant::now(),
         })
     }
 
@@ -254,6 +258,10 @@ impl SatelliteService {
         &mut self,
         state: &SatelliteState,
     ) -> Result<Option<SatelliteInput>, Box<dyn std::error::Error>> {
+        // Default: measure from call entry (for non-audio states like Responding).
+        // Overwritten after read_frame() for audio states to exclude ALSA blocking time.
+        self.tick_post_read = Instant::now();
+
         match state {
             // IDLE: either poll GPIO or read mic frames (depending on VAD mode)
             SatelliteState::Idle => {
@@ -271,6 +279,7 @@ impl SatelliteService {
                     // Read a frame, poll VAD first (borrow), then move into pre-roll buffer
                     match self.mic.read_frame() {
                         Ok(frame) => {
+                            self.tick_post_read = Instant::now();
                             // Poll VAD before buffering so we can borrow frame without cloning
                             if self.vad.poll(Some(&frame)) {
                                 self.last_vad_active = Instant::now();
@@ -353,7 +362,10 @@ impl SatelliteService {
             | SatelliteState::Processing => {
                 // 1. Read one mic frame (~20ms block)
                 let frame = match self.mic.read_frame() {
-                    Ok(f) => Some(f),
+                    Ok(f) => {
+                        self.tick_post_read = Instant::now();
+                        Some(f)
+                    }
                     Err(AudioError::EndOfStream) => {
                         if matches!(state, SatelliteState::Streaming) {
                             // In Streaming: audio exhausted = silence timeout
@@ -612,14 +624,16 @@ impl SatelliteService {
                 (Some(e), Some(t)) => e >= t,
                 _ => false,
             };
+            let work_us = self.tick_post_read.elapsed().as_micros() as u32;
             let json = format!(
-                r#"{{"energy":{},"phase":"{}","state":"{:?}","feedback":"{:?}","triggered":{},"connected":{}}}"#,
+                r#"{{"energy":{},"phase":"{}","state":"{:?}","feedback":"{:?}","triggered":{},"connected":{},"work_us":{}}}"#,
                 energy.map(|e| e.to_string()).unwrap_or_else(|| "null".into()),
                 phase,
                 state,
                 feedback_state,
                 triggered,
                 d.connected,
+                work_us,
             );
             push_sse(clients, "tick", &json);
         }

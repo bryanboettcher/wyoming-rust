@@ -274,7 +274,6 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         libasound2 \
-        wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Overlay ARMv6 sysroot libraries on top of Debian's arm/v7 libs.
@@ -304,6 +303,6 @@ COPY --from=builder /output/wyoming-satellite /usr/local/bin/wyoming-satellite
 EXPOSE 10700 8585
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q --spider http://localhost:8585/health || exit 1
+    CMD ["wyoming-satellite", "--health-check"]
 
 ENTRYPOINT ["wyoming-satellite"]

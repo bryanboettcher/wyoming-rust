@@ -16,6 +16,12 @@ use service::SatelliteService;
 use state::{transition, Action, FeedbackState, SatelliteState};
 
 fn main() {
+    // Health check mode: connect to diagnostics endpoint and exit 0/1.
+    // Runs before logger init to avoid noisy output in Docker health checks.
+    if std::env::args().any(|a| a == "--health-check") {
+        std::process::exit(run_health_check());
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp_millis()
         .init();
@@ -49,6 +55,46 @@ fn parse_args() -> PathBuf {
         PathBuf::from("satellite.toml")
     } else {
         PathBuf::from(&args[1])
+    }
+}
+
+/// Minimal HTTP health check using raw TCP — no shell, no external binaries.
+/// Reads the diagnostics port from WYOMING_HEALTH_PORT env (default 8585).
+fn run_health_check() -> i32 {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let port = std::env::var("WYOMING_HEALTH_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(8585);
+
+    let mut stream = match TcpStream::connect(("127.0.0.1", port)) {
+        Ok(s) => s,
+        Err(_) => return 1,
+    };
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .ok();
+
+    if stream
+        .write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        .is_err()
+    {
+        return 1;
+    }
+
+    let mut buf = [0u8; 32];
+    match stream.read(&mut buf) {
+        Ok(n) if n >= 12 => {
+            // Check for "HTTP/1.x 200"
+            if buf.starts_with(b"HTTP/1.") && &buf[9..12] == b"200" {
+                0
+            } else {
+                1
+            }
+        }
+        _ => 1,
     }
 }
 

@@ -23,11 +23,6 @@ services:
     devices:
       - /dev/snd:/dev/snd
     command: ["/data/satellite.toml"]
-    # Override Dockerfile HEALTHCHECK: the ARMv6 runtime library overlay replaces
-    # glibc 2.36 with 2.31, which breaks /bin/sh (and thus wget). Use the
-    # dashboard service's health check to proxy-verify satellite liveness instead.
-    healthcheck:
-      disable: true
     restart: unless-stopped
 
   dashboard:

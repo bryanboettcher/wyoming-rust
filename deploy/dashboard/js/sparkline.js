@@ -34,12 +34,16 @@ export function drawSparkline(canvas, history, attackThreshold, sustainThreshold
   // Y scale: max of both thresholds or highest energy, with padding
   const maxEnergy = Math.max(...history, attackThreshold || 0, sustainThreshold || 0);
   const yMax = Math.max(maxEnergy * 1.15, 100);
-  const monoFont = '9px ' + getComputedStyle(document.body).getPropertyValue('--mono');
+  const styles = getComputedStyle(document.body);
+  const monoFont = '9px ' + styles.getPropertyValue('--mono');
+  const redColor = styles.getPropertyValue('--red').trim();
+  const amberColor = styles.getPropertyValue('--amber').trim();
+  const blueColor = styles.getPropertyValue('--blue').trim();
 
   // Attack threshold line (red)
   if (attackThreshold != null) {
     const ty = h - pad - ((attackThreshold / yMax) * (h - pad * 2));
-    ctx.strokeStyle = '#c0392b44';
+    ctx.strokeStyle = redColor + '44';
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
@@ -47,7 +51,7 @@ export function drawSparkline(canvas, history, attackThreshold, sustainThreshold
     ctx.lineTo(w, ty);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#c0392b88';
+    ctx.fillStyle = redColor + '88';
     ctx.font = monoFont;
     ctx.fillText('attack', 3, ty - 3);
   }
@@ -55,7 +59,7 @@ export function drawSparkline(canvas, history, attackThreshold, sustainThreshold
   // Sustain threshold line (amber)
   if (sustainThreshold != null) {
     const ty = h - pad - ((sustainThreshold / yMax) * (h - pad * 2));
-    ctx.strokeStyle = '#e67e2244';
+    ctx.strokeStyle = amberColor + '44';
     ctx.lineWidth = 1;
     ctx.setLineDash([4, 3]);
     ctx.beginPath();
@@ -63,13 +67,13 @@ export function drawSparkline(canvas, history, attackThreshold, sustainThreshold
     ctx.lineTo(w, ty);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#e67e2288';
+    ctx.fillStyle = amberColor + '88';
     ctx.font = monoFont;
     ctx.fillText('sustain', 3, ty - 3);
   }
 
   // Energy line (blue)
-  ctx.strokeStyle = '#2980b9';
+  ctx.strokeStyle = blueColor;
   ctx.lineWidth = 1.5;
   ctx.beginPath();
   const step = w / (maxSamples - 1);

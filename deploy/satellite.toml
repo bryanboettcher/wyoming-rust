@@ -20,11 +20,25 @@ width = 2
 channels = 1
 chunk_ms = 20
 
-[vad]
-mode = "energy"
-attack_threshold = 500
-sustain_threshold = 200
+[pipeline]
 silence_timeout_ms = 2500
+buffer_seconds = 1.0
+
+[pipeline.highpass]
+cutoff_hz = 85.0
+
+[pipeline.bandpass]
+low_hz = 300.0
+high_hz = 3000.0
+
+[pipeline.zcr]
+
+[pipeline.mfcc]
+
+[pipeline.auto_energy]
+attack_ratio = 3.0
+sustain_ratio = 1.5
+hold_frames = 10
 
 [[feedback]]
 method = "log"

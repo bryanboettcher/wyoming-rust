@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -7,7 +8,346 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::config::Config;
+use crate::pipeline::StatKey;
 use crate::state::{FeedbackState, SatelliteState};
+
+// ── Session Tracker ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SessionOutcome {
+    /// Streaming→Idle without reaching Processing (most common false trigger)
+    SilenceTimeout,
+    /// Reached Processing or Responding
+    Completed,
+    /// Connection lost during session
+    Disconnected,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionRecord {
+    pub onset_uptime_ms: u64,
+    pub duration_ms: u64,
+    pub onset_energy: f64,
+    pub peak_energy: f64,
+    pub onset_zcr: f64,
+    pub mean_zcr: f64,
+    pub onset_speech_band: f64,
+    pub mean_speech_band: f64,
+    pub noise_floor: f64,
+    pub peak_state: String,
+    pub outcome: SessionOutcome,
+}
+
+struct ActiveSession {
+    onset_uptime_ms: u64,
+    onset_energy: f64,
+    onset_zcr: f64,
+    onset_speech_band: f64,
+    noise_floor: f64,
+    peak_energy: f64,
+    zcr_sum: f64,
+    speech_band_sum: f64,
+    frame_count: u32,
+    peak_state: SatelliteState,
+    needs_onset_stats: bool,
+}
+
+pub struct SessionTracker {
+    sessions: VecDeque<SessionRecord>,
+    max_sessions: usize,
+    active: Option<ActiveSession>,
+}
+
+impl SessionTracker {
+    pub fn new(max_sessions: usize) -> Self {
+        Self {
+            sessions: VecDeque::new(),
+            max_sessions,
+            active: None,
+        }
+    }
+
+    pub fn start_session(&mut self, uptime_ms: u64) {
+        self.active = Some(ActiveSession {
+            onset_uptime_ms: uptime_ms,
+            onset_energy: 0.0,
+            onset_zcr: 0.0,
+            onset_speech_band: 0.0,
+            noise_floor: 0.0,
+            peak_energy: 0.0,
+            zcr_sum: 0.0,
+            speech_band_sum: 0.0,
+            frame_count: 0,
+            peak_state: SatelliteState::Streaming,
+            needs_onset_stats: true,
+        });
+    }
+
+    pub fn end_session(&mut self, uptime_ms: u64, outcome: SessionOutcome) {
+        if let Some(active) = self.active.take() {
+            let duration_ms = uptime_ms.saturating_sub(active.onset_uptime_ms);
+            let n = active.frame_count.max(1) as f64;
+            let record = SessionRecord {
+                onset_uptime_ms: active.onset_uptime_ms,
+                duration_ms,
+                onset_energy: active.onset_energy,
+                peak_energy: active.peak_energy,
+                onset_zcr: active.onset_zcr,
+                mean_zcr: active.zcr_sum / n,
+                onset_speech_band: active.onset_speech_band,
+                mean_speech_band: active.speech_band_sum / n,
+                noise_floor: active.noise_floor,
+                peak_state: format!("{:?}", active.peak_state),
+                outcome,
+            };
+            if self.sessions.len() >= self.max_sessions {
+                self.sessions.pop_front();
+            }
+            self.sessions.push_back(record);
+        }
+    }
+
+    pub fn feed_tick(&mut self, energy: f64, zcr: f64, speech_band: f64, floor: f64) {
+        if let Some(ref mut active) = self.active {
+            if active.needs_onset_stats {
+                active.onset_energy = energy;
+                active.onset_zcr = zcr;
+                active.onset_speech_band = speech_band;
+                active.noise_floor = floor;
+                active.needs_onset_stats = false;
+            }
+            if energy > active.peak_energy {
+                active.peak_energy = energy;
+            }
+            active.zcr_sum += zcr;
+            active.speech_band_sum += speech_band;
+            active.frame_count += 1;
+        }
+    }
+
+    pub fn update_peak_state(&mut self, state: &SatelliteState) {
+        if let Some(ref mut active) = self.active {
+            // "Higher" state = further along the pipeline
+            let rank = |s: &SatelliteState| match s {
+                SatelliteState::Idle => 0,
+                SatelliteState::Streaming => 1,
+                SatelliteState::Triggered => 2,
+                SatelliteState::Processing => 3,
+                SatelliteState::Responding => 4,
+            };
+            if rank(state) > rank(&active.peak_state) {
+                active.peak_state = state.clone();
+            }
+        }
+    }
+
+    pub fn has_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Returns the peak state of the active session, if any.
+    pub fn active_peak_state(&self) -> Option<&SatelliteState> {
+        self.active.as_ref().map(|a| &a.peak_state)
+    }
+
+    pub fn sessions(&self) -> &VecDeque<SessionRecord> {
+        &self.sessions
+    }
+}
+
+const MAX_ROLLUP_ENTRIES: usize = 1440; // 24 hours at 1/min
+const ROLLUP_INTERVAL_SECS: u64 = 60;
+const MAX_SESSION_RECORDS: usize = 10_000;
+
+/// Single minute rollup entry. Serialized to JSON for `GET /rollups`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RollupEntry {
+    pub uptime_secs: u64,
+    pub energy_min: f64,
+    pub energy_max: f64,
+    pub energy_mean: f64,
+    pub energy_p95: f64,
+    pub floor_min: f64,
+    pub floor_max: f64,
+    pub floor_mean: f64,
+    pub trigger_count: u32,
+    pub triggered_frames: u32,
+    pub total_frames: u32,
+    pub zcr_mean: f64,
+    pub speech_band_mean: f64,
+    pub session_count: u32,
+    pub false_session_count: u32,
+    pub session_dur_mean_ms: u32,
+    pub session_dur_max_ms: u32,
+    pub spectral_centroid_mean: f64,
+    pub spectral_flatness_mean: f64,
+}
+
+/// Per-tick accumulator for building minute rollup entries.
+pub struct RollupAccumulator {
+    energy_sum: f64,
+    energy_min: f64,
+    energy_max: f64,
+    energy_samples: Vec<f64>,
+    floor_sum: f64,
+    floor_min: f64,
+    floor_max: f64,
+    trigger_count: u32,
+    triggered_frames: u32,
+    total_frames: u32,
+    was_triggered: bool,
+    zcr_sum: f64,
+    speech_band_sum: f64,
+    session_count: u32,
+    false_session_count: u32,
+    session_dur_sum_ms: u64,
+    session_dur_max_ms: u32,
+    spectral_centroid_sum: f64,
+    spectral_flatness_sum: f64,
+}
+
+impl RollupAccumulator {
+    fn new() -> Self {
+        let mut energy_samples = Vec::new();
+        energy_samples.reserve(3000);
+        Self {
+            energy_sum: 0.0,
+            energy_min: f64::MAX,
+            energy_max: f64::MIN,
+            energy_samples,
+            floor_sum: 0.0,
+            floor_min: f64::MAX,
+            floor_max: f64::MIN,
+            trigger_count: 0,
+            triggered_frames: 0,
+            total_frames: 0,
+            was_triggered: false,
+            zcr_sum: 0.0,
+            speech_band_sum: 0.0,
+            session_count: 0,
+            false_session_count: 0,
+            session_dur_sum_ms: 0,
+            session_dur_max_ms: 0,
+            spectral_centroid_sum: 0.0,
+            spectral_flatness_sum: 0.0,
+        }
+    }
+
+    /// Record a completed session into the current rollup interval.
+    pub fn record_session(&mut self, duration_ms: u64, outcome: SessionOutcome) {
+        self.session_count += 1;
+        if outcome == SessionOutcome::SilenceTimeout {
+            self.false_session_count += 1;
+        }
+        self.session_dur_sum_ms += duration_ms;
+        let dur_ms = duration_ms.min(u32::MAX as u64) as u32;
+        if dur_ms > self.session_dur_max_ms {
+            self.session_dur_max_ms = dur_ms;
+        }
+    }
+
+    /// Feed one tick's worth of stats into the accumulator.
+    pub fn feed(&mut self, energy: f64, floor: f64, triggered: bool, zcr: f64, speech_band: f64,
+                spectral_centroid: f64, spectral_flatness: f64) {
+        self.energy_sum += energy;
+        if energy < self.energy_min { self.energy_min = energy; }
+        if energy > self.energy_max { self.energy_max = energy; }
+        self.energy_samples.push(energy);
+
+        self.floor_sum += floor;
+        if floor < self.floor_min { self.floor_min = floor; }
+        if floor > self.floor_max { self.floor_max = floor; }
+
+        self.total_frames += 1;
+        if triggered {
+            self.triggered_frames += 1;
+        }
+        // Onset detection
+        if triggered && !self.was_triggered {
+            self.trigger_count += 1;
+        }
+        self.was_triggered = triggered;
+
+        self.zcr_sum += zcr;
+        self.speech_band_sum += speech_band;
+        self.spectral_centroid_sum += spectral_centroid;
+        self.spectral_flatness_sum += spectral_flatness;
+    }
+
+    /// Finalize the minute and produce a rollup entry. Resets the accumulator.
+    pub fn finish(&mut self, uptime_secs: u64) -> Option<RollupEntry> {
+        if self.total_frames == 0 {
+            return None;
+        }
+
+        let n = self.total_frames as f64;
+        let energy_mean = self.energy_sum / n;
+
+        // P95: sort and index
+        self.energy_samples.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p95_idx = ((self.energy_samples.len() as f64) * 0.95) as usize;
+        let energy_p95 = self.energy_samples.get(p95_idx.min(self.energy_samples.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0);
+
+        let entry = RollupEntry {
+            uptime_secs,
+            energy_min: self.energy_min,
+            energy_max: self.energy_max,
+            energy_mean,
+            energy_p95,
+            floor_min: self.floor_min,
+            floor_max: self.floor_max,
+            floor_mean: self.floor_sum / n,
+            trigger_count: self.trigger_count,
+            triggered_frames: self.triggered_frames,
+            total_frames: self.total_frames,
+            zcr_mean: self.zcr_sum / n,
+            speech_band_mean: self.speech_band_sum / n,
+            session_count: self.session_count,
+            false_session_count: self.false_session_count,
+            session_dur_mean_ms: if self.session_count > 0 {
+                (self.session_dur_sum_ms / self.session_count as u64).min(u32::MAX as u64) as u32
+            } else {
+                0
+            },
+            session_dur_max_ms: self.session_dur_max_ms,
+            spectral_centroid_mean: self.spectral_centroid_sum / n,
+            spectral_flatness_mean: self.spectral_flatness_sum / n,
+        };
+
+        // Reset for next minute
+        self.energy_sum = 0.0;
+        self.energy_min = f64::MAX;
+        self.energy_max = f64::MIN;
+        self.energy_samples.clear();
+        self.floor_sum = 0.0;
+        self.floor_min = f64::MAX;
+        self.floor_max = f64::MIN;
+        self.trigger_count = 0;
+        self.triggered_frames = 0;
+        self.total_frames = 0;
+        // Preserve was_triggered across minutes for onset tracking
+        self.zcr_sum = 0.0;
+        self.speech_band_sum = 0.0;
+        self.session_count = 0;
+        self.false_session_count = 0;
+        self.session_dur_sum_ms = 0;
+        self.session_dur_max_ms = 0;
+        self.spectral_centroid_sum = 0.0;
+        self.spectral_flatness_sum = 0.0;
+
+        Some(entry)
+    }
+}
+
+/// Extract a named stat from a snapshot's entries.
+pub fn extract_stat(entries: &[(&str, StatKey, f64)], key: StatKey) -> f64 {
+    entries.iter()
+        .find(|&&(_, k, _)| k == key)
+        .map(|&(_, _, v)| v)
+        .unwrap_or(0.0)
+}
 
 /// Raw diagnostic data updated by the main loop every tick.
 ///
@@ -22,13 +362,20 @@ pub struct DiagnosticsState {
     pub last_state_change: Instant,
     pub connected: bool,
     pub last_ping_received: Option<Instant>,
-    pub vad_current_energy: Option<u16>,
-    pub vad_phase: Option<String>,
     pub interaction_count: u64,
 
     // ── Commands (written by HTTP thread, consumed by main loop) ───────
-    pub pending_attack_threshold: Option<u16>,
-    pub pending_sustain_threshold: Option<u16>,
+    pub pending_attack_ratio: Option<f32>,
+    pub pending_sustain_ratio: Option<f32>,
+    pub pending_reset: bool,
+
+    // ── Minute rollup (written by main loop, read by HTTP) ─────────────
+    pub rollup_entries: Vec<RollupEntry>,
+    pub rollup_accumulator: RollupAccumulator,
+    pub rollup_last_push: Instant,
+
+    // ── Session tracker (written by main loop, read by HTTP) ─────────
+    pub session_tracker: SessionTracker,
 
     // ── Static (set once at startup) ────────────────────────────────────
     started_at: Instant,
@@ -37,32 +384,13 @@ pub struct DiagnosticsState {
     server_address: String,
     audio_device: String,
     audio_format: String,
-    vad_mode: String,
-    pub vad_attack_threshold: Option<u16>,
-    pub vad_sustain_threshold: Option<u16>,
+    stage_names: Vec<String>,
 }
 
 impl DiagnosticsState {
     pub fn new(config: &Config) -> Self {
         let now = Instant::now();
-        let (vad_mode, vad_attack_threshold, vad_sustain_threshold) = match &config.vad {
-            crate::config::VadConfig::AlwaysOn { .. } => ("always_on".into(), None, None),
-            crate::config::VadConfig::Gpio { pin, .. } => {
-                (format!("gpio(pin={})", pin), None, None)
-            }
-            crate::config::VadConfig::Energy {
-                attack_threshold,
-                sustain_threshold,
-                ..
-            } => {
-                let effective_sustain = if *sustain_threshold == 0 {
-                    *attack_threshold / 2
-                } else {
-                    *sustain_threshold
-                };
-                ("energy".into(), Some(*attack_threshold), Some(effective_sustain))
-            }
-        };
+
         let audio_device = config
             .audio
             .device
@@ -82,27 +410,94 @@ impl DiagnosticsState {
             last_state_change: now,
             connected: false,
             last_ping_received: None,
-            vad_current_energy: None,
-            vad_phase: None,
             interaction_count: 0,
-            pending_attack_threshold: None,
-            pending_sustain_threshold: None,
+            pending_attack_ratio: None,
+            pending_sustain_ratio: None,
+            pending_reset: false,
+            rollup_entries: Vec::with_capacity(MAX_ROLLUP_ENTRIES),
+            rollup_accumulator: RollupAccumulator::new(),
+            rollup_last_push: now,
+            session_tracker: SessionTracker::new(MAX_SESSION_RECORDS),
             started_at: now,
             satellite_name: config.satellite.name.clone(),
             area: config.satellite.area.clone(),
             server_address: format!("{}:{}", config.server.host, config.server.port),
             audio_device,
             audio_format,
-            vad_mode,
-            vad_attack_threshold,
-            vad_sustain_threshold,
+            stage_names: Vec::new(),
         }
     }
 
-    /// Build a JSON string with static config for the initial SSE snapshot event.
+    /// Set the pipeline stage names (called once after runner is created).
+    pub fn set_stage_names(&mut self, names: Vec<String>) {
+        self.stage_names = names;
+    }
+
+    /// Called on every state transition to drive session tracking.
+    pub fn on_state_change(&mut self, old: &SatelliteState, new: &SatelliteState) {
+        let uptime_ms = self.started_at.elapsed().as_millis() as u64;
+
+        // Idle → Streaming: start a new session
+        if *old == SatelliteState::Idle && *new == SatelliteState::Streaming {
+            self.session_tracker.start_session(uptime_ms);
+            return;
+        }
+
+        // Any → Idle while session is active: end it
+        if *new == SatelliteState::Idle && self.session_tracker.has_active() {
+            let outcome = match self.session_tracker.active_peak_state() {
+                Some(SatelliteState::Processing) | Some(SatelliteState::Responding) => SessionOutcome::Completed,
+                _ => SessionOutcome::SilenceTimeout,
+            };
+            self.session_tracker.end_session(uptime_ms, outcome);
+            // Record into rollup accumulator
+            if let Some(last) = self.session_tracker.sessions().back() {
+                self.rollup_accumulator.record_session(last.duration_ms, outcome);
+            }
+            return;
+        }
+
+        // Any other transition during active session: update peak state
+        self.session_tracker.update_peak_state(new);
+    }
+
+    /// Abort active session as Disconnected (called on session re-entry or error).
+    pub fn abort_active_session(&mut self) {
+        if self.session_tracker.has_active() {
+            let uptime_ms = self.started_at.elapsed().as_millis() as u64;
+            self.session_tracker.end_session(uptime_ms, SessionOutcome::Disconnected);
+            if let Some(last) = self.session_tracker.sessions().back() {
+                self.rollup_accumulator.record_session(last.duration_ms, SessionOutcome::Disconnected);
+            }
+        }
+    }
+
+    /// Feed one tick's pipeline stats into the rollup accumulator.
+    /// If a minute has elapsed, finalizes the entry and pushes to the ring buffer.
+    pub fn feed_rollup(&mut self, energy: f64, floor: f64, triggered: bool, zcr: f64, speech_band: f64,
+                       spectral_centroid: f64, spectral_flatness: f64) {
+        self.rollup_accumulator.feed(energy, floor, triggered, zcr, speech_band,
+                                     spectral_centroid, spectral_flatness);
+
+        if self.rollup_last_push.elapsed().as_secs() >= ROLLUP_INTERVAL_SECS {
+            let uptime_secs = self.started_at.elapsed().as_secs();
+            if let Some(entry) = self.rollup_accumulator.finish(uptime_secs) {
+                if self.rollup_entries.len() >= MAX_ROLLUP_ENTRIES {
+                    self.rollup_entries.remove(0);
+                }
+                self.rollup_entries.push(entry);
+                log::debug!("Rollup entry pushed ({} total)", self.rollup_entries.len());
+            }
+            self.rollup_last_push = Instant::now();
+        }
+    }
+
     fn to_sse_snapshot(&self) -> String {
+        let stages_json: Vec<String> = self.stage_names.iter()
+            .map(|s| format!(r#""{}""#, s))
+            .collect();
         format!(
-            r#"{{"satellite_name":"{}","area":{},"audio_device":"{}","audio_format":"{}","vad_mode":"{}","attack_threshold":{},"sustain_threshold":{},"server_address":"{}"}}"#,
+            r#"{{"satellite_name":"{}","area":{},"audio_device":"{}","audio_format":"{}","server_address":"{}","stages":[{}]}}"#,
             self.satellite_name,
             match &self.area {
                 Some(a) => format!(r#""{}""#, a),
@@ -110,21 +505,14 @@ impl DiagnosticsState {
             },
             self.audio_device,
             self.audio_format,
-            self.vad_mode,
-            self.vad_attack_threshold.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
-            self.vad_sustain_threshold.map(|v| v.to_string()).unwrap_or_else(|| "null".into()),
             self.server_address,
+            stages_json.join(","),
         )
     }
 
     /// Build a serializable snapshot on demand (only called on HTTP request).
     fn to_snapshot(&self) -> DiagnosticsSnapshot {
         let now = Instant::now();
-        // Determine the active threshold based on VAD phase
-        let active_threshold = match self.vad_phase.as_deref() {
-            Some("sustain") => self.vad_sustain_threshold,
-            _ => self.vad_attack_threshold,
-        };
         DiagnosticsSnapshot {
             state: format!("{:?}", self.state),
             feedback_state: format!("{:?}", self.feedback_state),
@@ -134,21 +522,13 @@ impl DiagnosticsState {
             last_ping_secs: self
                 .last_ping_received
                 .map(|t| now.duration_since(t).as_secs_f64()),
-            vad_mode: self.vad_mode.clone(),
-            vad_attack_threshold: self.vad_attack_threshold,
-            vad_sustain_threshold: self.vad_sustain_threshold,
-            vad_phase: self.vad_phase.clone(),
-            vad_current_energy: self.vad_current_energy,
-            vad_triggered: match (self.vad_current_energy, active_threshold) {
-                (Some(energy), Some(threshold)) => energy >= threshold,
-                _ => false,
-            },
             uptime_seconds: now.duration_since(self.started_at).as_secs_f64(),
             interaction_count: self.interaction_count,
             satellite_name: self.satellite_name.clone(),
             area: self.area.clone(),
             audio_device: self.audio_device.clone(),
             audio_format: self.audio_format.clone(),
+            stages: self.stage_names.clone(),
         }
     }
 }
@@ -163,18 +543,13 @@ pub struct DiagnosticsSnapshot {
     pub connected: bool,
     pub server_address: String,
     pub last_ping_secs: Option<f64>,
-    pub vad_mode: String,
-    pub vad_attack_threshold: Option<u16>,
-    pub vad_sustain_threshold: Option<u16>,
-    pub vad_phase: Option<String>,
-    pub vad_current_energy: Option<u16>,
-    pub vad_triggered: bool,
     pub uptime_seconds: f64,
     pub interaction_count: u64,
     pub satellite_name: String,
     pub area: Option<String>,
     pub audio_device: String,
     pub audio_format: String,
+    pub stages: Vec<String>,
 }
 
 pub type SharedDiagnostics = Arc<Mutex<DiagnosticsState>>;
@@ -286,16 +661,47 @@ fn handle_request(
                 json
             )?;
         }
+        ("GET", "/rollups") => {
+            let entries = &diagnostics.lock().unwrap().rollup_entries;
+            let json = serde_json::to_string(entries)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                json.len(),
+                json
+            )?;
+        }
+        ("GET", "/sessions") => {
+            let sessions = diagnostics.lock().unwrap().session_tracker.sessions().clone();
+            let json = serde_json::to_string(&sessions)?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                json.len(),
+                json
+            )?;
+        }
         ("GET", "/stream") => {
             handle_sse_connection(stream, diagnostics, sse_clients)?;
             // SSE connection runs in a spawned thread; don't flush/close here
             return Ok(());
         }
-        ("POST", "/vad/attack_threshold") => {
-            handle_set_threshold(stream, &mut reader, diagnostics, content_length, ThresholdKind::Attack)?;
+        ("POST", "/vad/attack_ratio") => {
+            handle_set_ratio(stream, &mut reader, diagnostics, content_length, RatioKind::Attack)?;
         }
-        ("POST", "/vad/sustain_threshold") => {
-            handle_set_threshold(stream, &mut reader, diagnostics, content_length, ThresholdKind::Sustain)?;
+        ("POST", "/vad/sustain_ratio") => {
+            handle_set_ratio(stream, &mut reader, diagnostics, content_length, RatioKind::Sustain)?;
+        }
+        ("POST", "/pipeline/reset") => {
+            diagnostics.lock().unwrap().pending_reset = true;
+            log::info!("Pipeline reset queued via HTTP");
+            let body = r#"{"reset":"queued"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )?;
         }
         _ => {
             let body = "Not Found";
@@ -389,34 +795,32 @@ fn handle_sse_connection(
     Ok(())
 }
 
-enum ThresholdKind {
+enum RatioKind {
     Attack,
     Sustain,
 }
 
-fn handle_set_threshold(
+fn handle_set_ratio(
     stream: &mut std::net::TcpStream,
     reader: &mut BufReader<std::net::TcpStream>,
     diagnostics: &SharedDiagnostics,
     content_length: usize,
-    kind: ThresholdKind,
+    kind: RatioKind,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Read request body
     let mut body = vec![0u8; content_length.min(64)];
     std::io::Read::read_exact(reader, &mut body)?;
     let body_str = String::from_utf8_lossy(&body);
 
     let label = match kind {
-        ThresholdKind::Attack => "attack_threshold",
-        ThresholdKind::Sustain => "sustain_threshold",
+        RatioKind::Attack => "attack_ratio",
+        RatioKind::Sustain => "sustain_ratio",
     };
 
-    // Parse as u16 threshold
-    let threshold: u16 = match body_str.trim().parse() {
-        Ok(v) if v >= 1 => v,
+    let ratio: f32 = match body_str.trim().parse() {
+        Ok(v) if v > 0.0 => v,
         _ => {
             let err = format!(
-                r#"{{"error":"{} must be an integer between 1 and 65535"}}"#,
+                r#"{{"error":"{} must be a positive number"}}"#,
                 label
             );
             write!(
@@ -432,13 +836,13 @@ fn handle_set_threshold(
     {
         let mut d = diagnostics.lock().unwrap();
         match kind {
-            ThresholdKind::Attack => d.pending_attack_threshold = Some(threshold),
-            ThresholdKind::Sustain => d.pending_sustain_threshold = Some(threshold),
+            RatioKind::Attack => d.pending_attack_ratio = Some(ratio),
+            RatioKind::Sustain => d.pending_sustain_ratio = Some(ratio),
         }
     }
-    log::info!("{} update queued: {}", label, threshold);
+    log::info!("{} update queued: {}", label, ratio);
 
-    let resp = format!(r#"{{"{}":{}}}"#, label, threshold);
+    let resp = format!(r#"{{"{}":{}}}"#, label, ratio);
     write!(
         stream,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -469,10 +873,12 @@ port = 10700
 [audio]
 wav_input = "test.wav"
 
-[vad]
-mode = "energy"
-attack_threshold = 1000
-sustain_threshold = 400
+[pipeline]
+silence_timeout_ms = 2500
+
+[pipeline.auto_energy]
+attack_ratio = 3.0
+sustain_ratio = 1.5
 "#;
         toml::from_str(toml).unwrap()
     }
@@ -489,12 +895,6 @@ sustain_threshold = 400
         assert_eq!(snap.satellite_name, "test-sat");
         assert_eq!(snap.area.as_deref(), Some("Office"));
         assert_eq!(snap.server_address, "10.0.0.1:10700");
-        assert_eq!(snap.vad_mode, "energy");
-        assert_eq!(snap.vad_attack_threshold, Some(1000));
-        assert_eq!(snap.vad_sustain_threshold, Some(400));
-        assert_eq!(snap.vad_phase, None);
-        assert_eq!(snap.vad_current_energy, None);
-        assert!(!snap.vad_triggered);
         assert_eq!(snap.interaction_count, 0);
         assert_eq!(snap.audio_device, "test.wav");
         assert_eq!(snap.audio_format, "16000Hz 16bit 1ch");
@@ -509,15 +909,12 @@ sustain_threshold = 400
         state.state = SatelliteState::Streaming;
         state.feedback_state = FeedbackState::Listening;
         state.connected = true;
-        state.vad_current_energy = Some(1500);
         state.interaction_count = 3;
 
         let snap = state.to_snapshot();
         assert_eq!(snap.state, "Streaming");
         assert_eq!(snap.feedback_state, "Listening");
         assert!(snap.connected);
-        assert_eq!(snap.vad_current_energy, Some(1500));
-        assert!(snap.vad_triggered); // 1500 >= 1000 (attack threshold, phase is None/attack)
         assert_eq!(snap.interaction_count, 3);
     }
 
@@ -528,36 +925,8 @@ sustain_threshold = 400
         let snap = state.to_snapshot();
         let json = serde_json::to_string(&snap).unwrap();
 
-        // Verify key fields are present
         assert!(json.contains("\"state\":\"Idle\""));
         assert!(json.contains("\"satellite_name\":\"test-sat\""));
-        assert!(json.contains("\"vad_attack_threshold\":1000"));
-        assert!(json.contains("\"vad_sustain_threshold\":400"));
-    }
-
-    #[test]
-    fn vad_triggered_uses_phase_appropriate_threshold() {
-        let config = test_config();
-        let mut state = DiagnosticsState::new(&config);
-
-        // In attack phase (default): uses attack_threshold=1000
-        state.vad_current_energy = Some(500);
-        assert!(!state.to_snapshot().vad_triggered);
-
-        state.vad_current_energy = Some(1000);
-        assert!(state.to_snapshot().vad_triggered);
-
-        // In sustain phase: uses sustain_threshold=400
-        state.vad_phase = Some("sustain".into());
-        state.vad_current_energy = Some(500);
-        assert!(state.to_snapshot().vad_triggered); // 500 >= 400
-
-        state.vad_current_energy = Some(300);
-        assert!(!state.to_snapshot().vad_triggered); // 300 < 400
-
-        // No energy reading
-        state.vad_current_energy = None;
-        assert!(!state.to_snapshot().vad_triggered);
     }
 
     #[test]

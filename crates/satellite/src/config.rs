@@ -20,8 +20,6 @@ pub struct Config {
     pub server: ServerConfig,
     pub audio: AudioConfig,
     #[serde(default)]
-    pub vad: VadConfig,
-    #[serde(default)]
     pub feedback: Vec<FeedbackProviderConfig>,
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
@@ -115,72 +113,6 @@ impl AudioConfig {
     }
 }
 
-/// Voice Activity Detection configuration. Discriminated by the `mode` field.
-///
-/// Three modes are supported:
-/// - `always_on`: Auto-trigger mode for testing (default)
-/// - `gpio`: Hardware button/trigger on a GPIO pin
-/// - `energy`: Software RMS-based VAD on audio frames
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "mode")]
-pub enum VadConfig {
-    #[serde(rename = "always_on")]
-    AlwaysOn {
-        #[serde(default = "default_silence_timeout_ms")]
-        silence_timeout_ms: u64,
-        #[serde(default = "default_buffer_seconds")]
-        buffer_seconds: f64,
-    },
-
-    #[serde(rename = "gpio")]
-    Gpio {
-        pin: u32,
-        #[serde(default = "default_silence_timeout_ms")]
-        silence_timeout_ms: u64,
-    },
-
-    #[serde(rename = "energy")]
-    Energy {
-        attack_threshold: u16,
-        #[serde(default)]
-        sustain_threshold: u16,
-        #[serde(default = "default_silence_timeout_ms")]
-        silence_timeout_ms: u64,
-        #[serde(default = "default_buffer_seconds")]
-        buffer_seconds: f64,
-    },
-}
-
-impl Default for VadConfig {
-    fn default() -> Self {
-        VadConfig::AlwaysOn {
-            silence_timeout_ms: default_silence_timeout_ms(),
-            buffer_seconds: default_buffer_seconds(),
-        }
-    }
-}
-
-impl VadConfig {
-    /// Get the silence timeout in milliseconds for this VAD mode.
-    pub fn silence_timeout_ms(&self) -> u64 {
-        match self {
-            VadConfig::AlwaysOn { silence_timeout_ms, .. } => *silence_timeout_ms,
-            VadConfig::Gpio { silence_timeout_ms, .. } => *silence_timeout_ms,
-            VadConfig::Energy { silence_timeout_ms, .. } => *silence_timeout_ms,
-        }
-    }
-
-    /// Seconds of audio to buffer as pre-roll before wake word detection.
-    /// Returns 0.0 for GPIO mode (no continuous capture).
-    pub fn buffer_seconds(&self) -> f64 {
-        match self {
-            VadConfig::AlwaysOn { buffer_seconds, .. } => *buffer_seconds,
-            VadConfig::Gpio { .. } => 0.0,
-            VadConfig::Energy { buffer_seconds, .. } => *buffer_seconds,
-        }
-    }
-}
-
 fn default_silence_timeout_ms() -> u64 {
     2500
 }
@@ -195,13 +127,29 @@ fn default_buffer_seconds() -> f64 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PipelineConfig {
-    /// Master switch. When false (default), no pipeline stages are created
-    /// and audio passes through unmodified with zero overhead.
-    #[serde(default)]
-    pub enabled: bool,
+    #[serde(default = "default_silence_timeout_ms")]
+    pub silence_timeout_ms: u64,
+
+    #[serde(default = "default_buffer_seconds")]
+    pub buffer_seconds: f64,
 
     #[serde(default)]
     pub highpass: Option<HighPassConfig>,
+
+    #[serde(default)]
+    pub energy_detector: Option<EnergyDetectorConfig>,
+
+    #[serde(default)]
+    pub auto_energy: Option<AutoEnergyConfig>,
+
+    #[serde(default)]
+    pub bandpass: Option<BandpassConfig>,
+
+    #[serde(default)]
+    pub zcr: Option<ZcrConfig>,
+
+    #[serde(default)]
+    pub mfcc: Option<MfccConfig>,
 
     #[serde(default)]
     pub gate: Option<GateConfig>,
@@ -209,21 +157,37 @@ pub struct PipelineConfig {
     #[serde(default)]
     pub agc: Option<AgcConfig>,
 
-    /// How often analyze() runs on each stage (in frames). Default 50 = 1 second at 20ms.
     #[serde(default = "default_analyze_interval")]
     pub analyze_interval: u64,
+
+    /// Maximum duration (seconds) for a single streaming session. After this,
+    /// the satellite forces a silence timeout even if the detector is still
+    /// triggering. Prevents runaway streaming from stuck detection. 0 = no limit.
+    #[serde(default = "default_max_stream_seconds")]
+    pub max_stream_seconds: u64,
 }
 
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            silence_timeout_ms: default_silence_timeout_ms(),
+            buffer_seconds: default_buffer_seconds(),
             highpass: None,
+            energy_detector: None,
+            auto_energy: None,
+            bandpass: None,
+            zcr: None,
+            mfcc: None,
             gate: None,
             agc: None,
             analyze_interval: default_analyze_interval(),
+            max_stream_seconds: default_max_stream_seconds(),
         }
     }
+}
+
+fn default_max_stream_seconds() -> u64 {
+    300 // 5 minutes
 }
 
 fn default_analyze_interval() -> u64 {
@@ -244,6 +208,89 @@ fn default_hpf_enabled() -> bool {
 
 fn default_hpf_cutoff() -> f32 {
     85.0
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnergyDetectorConfig {
+    pub attack_threshold: u16,
+    #[serde(default)]
+    pub sustain_threshold: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AutoEnergyConfig {
+    #[serde(default = "default_attack_ratio")]
+    pub attack_ratio: f32,
+    #[serde(default = "default_sustain_ratio")]
+    pub sustain_ratio: f32,
+    /// Require N consecutive triggered frames before signaling true. 0 = disabled.
+    #[serde(default)]
+    pub hold_frames: u16,
+}
+
+fn default_attack_ratio() -> f32 {
+    3.0
+}
+
+fn default_sustain_ratio() -> f32 {
+    1.5
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ZcrConfig {
+    #[serde(default = "default_zcr_enabled")]
+    pub enabled: bool,
+}
+
+fn default_zcr_enabled() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BandpassConfig {
+    #[serde(default = "default_bandpass_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_bandpass_low")]
+    pub low_hz: f32,
+    #[serde(default = "default_bandpass_high")]
+    pub high_hz: f32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MfccConfig {
+    #[serde(default = "default_mfcc_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_n_mfcc")]
+    pub n_mfcc: usize,
+    #[serde(default = "default_n_mels")]
+    pub n_mels: usize,
+    #[serde(default = "default_n_fft")]
+    pub n_fft: usize,
+}
+
+fn default_mfcc_enabled() -> bool {
+    true
+}
+fn default_n_mfcc() -> usize {
+    13
+}
+fn default_n_mels() -> usize {
+    26
+}
+fn default_n_fft() -> usize {
+    512
+}
+
+fn default_bandpass_enabled() -> bool {
+    true
+}
+
+fn default_bandpass_low() -> f32 {
+    300.0
+}
+
+fn default_bandpass_high() -> f32 {
+    3000.0
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -524,20 +571,20 @@ impl Config {
                 "audio config cannot specify both 'device' and 'wav_input'".into(),
             ));
         }
-        let buffer_seconds = self.vad.buffer_seconds();
+        let buffer_seconds = self.pipeline.buffer_seconds;
         if buffer_seconds.is_nan() || buffer_seconds.is_infinite() {
             return Err(ConfigError::Invalid(
-                "vad.buffer_seconds must be a finite number".into(),
+                "pipeline.buffer_seconds must be a finite number".into(),
             ));
         }
         if buffer_seconds < 0.0 {
             return Err(ConfigError::Invalid(
-                "vad.buffer_seconds must not be negative".into(),
+                "pipeline.buffer_seconds must not be negative".into(),
             ));
         }
         if buffer_seconds > 10.0 {
             return Err(ConfigError::Invalid(format!(
-                "vad.buffer_seconds must be <= 10.0, got {}",
+                "pipeline.buffer_seconds must be <= 10.0, got {}",
                 buffer_seconds
             )));
         }
@@ -577,48 +624,6 @@ chunk_ms = 20
     }
 
     #[test]
-    fn parse_hardware_config_with_gpio_vad() {
-        let toml = r#"
-[satellite]
-name = "living-room"
-area = "Living Room"
-
-[server]
-host = "homeassistant.local"
-
-[audio]
-device = "hw:0,0"
-
-[vad]
-mode = "gpio"
-pin = 17
-silence_timeout_ms = 2500
-
-[[feedback]]
-method = "neopixel"
-pin = 10
-led_count = 3
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        match &config.vad {
-            VadConfig::Gpio { pin, silence_timeout_ms } => {
-                assert_eq!(*pin, 17);
-                assert_eq!(*silence_timeout_ms, 2500);
-            }
-            other => panic!("expected Gpio VAD, got {:?}", other),
-        }
-        assert_eq!(config.feedback.len(), 1);
-        match &config.feedback[0] {
-            FeedbackProviderConfig::Neopixel { pin, led_count, .. } => {
-                assert_eq!(*pin, 10);
-                assert_eq!(*led_count, 3);
-            }
-            other => panic!("expected Neopixel, got {:?}", other),
-        }
-        assert_eq!(config.server.port, 10700); // default
-    }
-
-    #[test]
     fn defaults_for_vad_and_feedback() {
         let toml = r#"
 [satellite]
@@ -631,8 +636,7 @@ host = "localhost"
 wav_input = "test.wav"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert!(matches!(config.vad, VadConfig::AlwaysOn { .. }));
-        assert_eq!(config.vad.silence_timeout_ms(), 2500);
+        assert_eq!(config.pipeline.silence_timeout_ms, 2500);
         assert!(config.feedback.is_empty());
     }
 
@@ -1002,186 +1006,8 @@ wav_input = "test.wav"
     }
 
     #[test]
-    fn vad_mode_always_on() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "always_on"
-silence_timeout_ms = 3000
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        match &config.vad {
-            VadConfig::AlwaysOn { silence_timeout_ms, .. } => {
-                assert_eq!(*silence_timeout_ms, 3000);
-            }
-            other => panic!("expected AlwaysOn VAD, got {:?}", other),
-        }
-        assert_eq!(config.vad.silence_timeout_ms(), 3000);
-    }
-
-    #[test]
-    fn vad_mode_gpio() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "gpio"
-pin = 23
-silence_timeout_ms = 1500
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        match &config.vad {
-            VadConfig::Gpio { pin, silence_timeout_ms } => {
-                assert_eq!(*pin, 23);
-                assert_eq!(*silence_timeout_ms, 1500);
-            }
-            other => panic!("expected Gpio VAD, got {:?}", other),
-        }
-        assert_eq!(config.vad.silence_timeout_ms(), 1500);
-    }
-
-    #[test]
-    fn vad_mode_energy() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "energy"
-attack_threshold = 500
-sustain_threshold = 200
-silence_timeout_ms = 2000
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        match &config.vad {
-            VadConfig::Energy { attack_threshold, sustain_threshold, silence_timeout_ms, .. } => {
-                assert_eq!(*attack_threshold, 500);
-                assert_eq!(*sustain_threshold, 200);
-                assert_eq!(*silence_timeout_ms, 2000);
-            }
-            other => panic!("expected Energy VAD, got {:?}", other),
-        }
-        assert_eq!(config.vad.silence_timeout_ms(), 2000);
-    }
-
-    #[test]
-    fn vad_energy_sustain_defaults_to_zero() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "energy"
-attack_threshold = 1000
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        match &config.vad {
-            VadConfig::Energy { attack_threshold, sustain_threshold, .. } => {
-                assert_eq!(*attack_threshold, 1000);
-                assert_eq!(*sustain_threshold, 0); // default, resolved to attack/2 at runtime
-            }
-            other => panic!("expected Energy VAD, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn vad_mode_gpio_with_default_timeout() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "gpio"
-pin = 17
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.vad.silence_timeout_ms(), 2500); // default
-    }
-
-    #[test]
-    fn buffer_seconds_defaults() {
-        // AlwaysOn defaults to 1.0
-        let vad = VadConfig::AlwaysOn {
-            silence_timeout_ms: 2500,
-            buffer_seconds: default_buffer_seconds(),
-        };
-        assert_eq!(vad.buffer_seconds(), 1.0);
-
-        // Energy defaults to 1.0
-        let vad = VadConfig::Energy {
-            attack_threshold: 1000,
-            sustain_threshold: 0,
-            silence_timeout_ms: 2500,
-            buffer_seconds: default_buffer_seconds(),
-        };
-        assert_eq!(vad.buffer_seconds(), 1.0);
-
-        // GPIO always returns 0.0
-        let vad = VadConfig::Gpio {
-            pin: 17,
-            silence_timeout_ms: 2500,
-        };
-        assert_eq!(vad.buffer_seconds(), 0.0);
-    }
-
-    #[test]
-    fn buffer_seconds_parsed_from_config() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "energy"
-attack_threshold = 1500
-buffer_seconds = 2.5
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.vad.buffer_seconds(), 2.5);
-    }
-
-    #[test]
     fn buffer_seconds_invalid_values_rejected() {
-        // Helper: build a minimal Config with the given VadConfig and call validate()
-        fn make_config(vad: VadConfig) -> Config {
+        fn make_config(buffer_seconds: f64) -> Config {
             Config {
                 satellite: SatelliteConfig { name: "test".into(), area: None },
                 server: ServerConfig { mode: "listen".into(), host: "localhost".into(), port: 10700 },
@@ -1195,77 +1021,19 @@ buffer_seconds = 2.5
                     channels: 1,
                     chunk_ms: 20,
                 },
-                vad,
                 feedback: vec![],
                 diagnostics: DiagnosticsConfig::default(),
-                pipeline: PipelineConfig::default(),
+                pipeline: PipelineConfig {
+                    buffer_seconds,
+                    ..PipelineConfig::default()
+                },
             }
         }
 
-        // Negative value
-        let cfg = make_config(VadConfig::AlwaysOn {
-            silence_timeout_ms: 2500,
-            buffer_seconds: -1.0,
-        });
-        assert!(cfg.validate().is_err(), "negative buffer_seconds should be rejected");
-
-        // Value exceeding 10.0
-        let cfg = make_config(VadConfig::AlwaysOn {
-            silence_timeout_ms: 2500,
-            buffer_seconds: 10.1,
-        });
-        assert!(cfg.validate().is_err(), "buffer_seconds > 10.0 should be rejected");
-
-        // Value exactly at the limit is accepted
-        let cfg = make_config(VadConfig::AlwaysOn {
-            silence_timeout_ms: 2500,
-            buffer_seconds: 10.0,
-        });
-        assert!(cfg.validate().is_ok(), "buffer_seconds == 10.0 should be accepted");
-
-        // Zero is valid
-        let cfg = make_config(VadConfig::AlwaysOn {
-            silence_timeout_ms: 2500,
-            buffer_seconds: 0.0,
-        });
-        assert!(cfg.validate().is_ok(), "buffer_seconds == 0.0 should be accepted");
-
-        // Energy variant: negative value rejected
-        let cfg = make_config(VadConfig::Energy {
-            attack_threshold: 1000,
-            sustain_threshold: 0,
-            silence_timeout_ms: 2500,
-            buffer_seconds: -0.5,
-        });
-        assert!(cfg.validate().is_err(), "energy negative buffer_seconds should be rejected");
-
-        // Energy variant: too large
-        let cfg = make_config(VadConfig::Energy {
-            attack_threshold: 1000,
-            sustain_threshold: 0,
-            silence_timeout_ms: 2500,
-            buffer_seconds: 99.0,
-        });
-        assert!(cfg.validate().is_err(), "energy buffer_seconds > 10.0 should be rejected");
-    }
-
-    #[test]
-    fn vad_mode_unknown_rejected() {
-        let toml = r#"
-[satellite]
-name = "test"
-
-[server]
-host = "localhost"
-
-[audio]
-wav_input = "test.wav"
-
-[vad]
-mode = "invalid_mode"
-"#;
-        let result: Result<Config, _> = toml::from_str(toml);
-        assert!(result.is_err());
+        assert!(make_config(-1.0).validate().is_err(), "negative buffer_seconds should be rejected");
+        assert!(make_config(10.1).validate().is_err(), "buffer_seconds > 10.0 should be rejected");
+        assert!(make_config(10.0).validate().is_ok(), "buffer_seconds == 10.0 should be accepted");
+        assert!(make_config(0.0).validate().is_ok(), "buffer_seconds == 0.0 should be accepted");
     }
 
     #[test]
@@ -1328,5 +1096,82 @@ port = 3000
         assert!(config.diagnostics.enabled); // default
         assert_eq!(config.diagnostics.port, 3000);
         assert_eq!(config.diagnostics.bind, "0.0.0.0"); // default
+    }
+
+    #[test]
+    fn pipeline_config_with_auto_energy() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[pipeline]
+silence_timeout_ms = 3000
+buffer_seconds = 2.0
+
+[pipeline.highpass]
+cutoff_hz = 85.0
+
+[pipeline.auto_energy]
+attack_ratio = 4.0
+sustain_ratio = 2.0
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.pipeline.silence_timeout_ms, 3000);
+        assert_eq!(config.pipeline.buffer_seconds, 2.0);
+        let hp = config.pipeline.highpass.unwrap();
+        assert!(hp.enabled);
+        assert_eq!(hp.cutoff_hz, 85.0);
+        let ae = config.pipeline.auto_energy.unwrap();
+        assert_eq!(ae.attack_ratio, 4.0);
+        assert_eq!(ae.sustain_ratio, 2.0);
+    }
+
+    #[test]
+    fn pipeline_config_with_energy_detector() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+
+[pipeline.energy_detector]
+attack_threshold = 500
+sustain_threshold = 200
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let ed = config.pipeline.energy_detector.unwrap();
+        assert_eq!(ed.attack_threshold, 500);
+        assert_eq!(ed.sustain_threshold, 200);
+    }
+
+    #[test]
+    fn pipeline_defaults_to_always_on() {
+        let toml = r#"
+[satellite]
+name = "test"
+
+[server]
+host = "localhost"
+
+[audio]
+wav_input = "test.wav"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        // No pipeline section → default PipelineConfig with no stages = always-on
+        assert!(config.pipeline.highpass.is_none());
+        assert!(config.pipeline.energy_detector.is_none());
+        assert!(config.pipeline.auto_energy.is_none());
+        assert_eq!(config.pipeline.silence_timeout_ms, 2500);
+        assert_eq!(config.pipeline.buffer_seconds, 1.0);
     }
 }

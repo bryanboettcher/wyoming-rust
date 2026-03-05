@@ -18,6 +18,38 @@
   --red: #c0392b;
   --amber: #e67e22;
   --blue: #2980b9;
+  --badge-idle-bg: #eef1f5;
+  --badge-idle-fg: #5a6a7a;
+  --badge-streaming-bg: #e8f5e9;
+  --badge-streaming-fg: #2e7d32;
+  --badge-processing-bg: #fff3e0;
+  --badge-processing-fg: #e65100;
+  --badge-responding-bg: #e3f2fd;
+  --badge-responding-fg: #1565c0;
+  --sparkline-bg: #f4f6f8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111117;
+    --surface: #1a1a24;
+    --border: #2a2a3a;
+    --text: #d4d4dc;
+    --text-muted: #7a7a8e;
+    --green: #2ecc71;
+    --red: #e74c3c;
+    --amber: #f39c12;
+    --blue: #3498db;
+    --badge-idle-bg: #22222e;
+    --badge-idle-fg: #8888a0;
+    --badge-streaming-bg: #1a2e1a;
+    --badge-streaming-fg: #4caf50;
+    --badge-processing-bg: #2e2418;
+    --badge-processing-fg: #ff9800;
+    --badge-responding-bg: #182430;
+    --badge-responding-fg: #42a5f5;
+    --sparkline-bg: #16161e;
+  }
 }
 
 body {
@@ -26,7 +58,7 @@ body {
   color: var(--text);
   line-height: 1.5;
   padding: 1rem;
-  max-width: 640px;
+  max-width: 960px;
   margin: 0 auto;
 }
 
@@ -48,12 +80,21 @@ header .subtitle {
   margin-top: 0.15rem;
 }
 
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+@media (max-width: 700px) {
+  .grid { grid-template-columns: 1fr; }
+}
+
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 0.875rem 1rem;
-  margin-bottom: 0.75rem;
 }
 
 .card-title {
@@ -104,14 +145,14 @@ header .subtitle {
   font-weight: 600;
   padding: 0.15rem 0.5rem;
   border-radius: 4px;
-  background: #eef1f5;
+  background: var(--badge-idle-bg);
   color: var(--text);
 }
 
-.state-badge.idle { background: #eef1f5; color: #5a6a7a; }
-.state-badge.streaming { background: #e8f5e9; color: #2e7d32; }
-.state-badge.processing { background: #fff3e0; color: #e65100; }
-.state-badge.responding { background: #e3f2fd; color: #1565c0; }
+.state-badge.idle { background: var(--badge-idle-bg); color: var(--badge-idle-fg); }
+.state-badge.streaming { background: var(--badge-streaming-bg); color: var(--badge-streaming-fg); }
+.state-badge.processing { background: var(--badge-processing-bg); color: var(--badge-processing-fg); }
+.state-badge.responding { background: var(--badge-responding-bg); color: var(--badge-responding-fg); }
 
 .sparkline-wrap {
   margin-top: 0.5rem;
@@ -123,8 +164,45 @@ header .subtitle {
   height: 56px;
   display: block;
   border-radius: 4px;
-  background: #f4f6f8;
+  background: var(--sparkline-bg);
 }
+
+.stats-section {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+.stats-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+}
+.reset-btn {
+  font-size: 0.65rem;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+.reset-btn:hover { border-color: var(--red); color: var(--red); }
+.clear-link {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+.clear-link:hover { color: var(--red); }
 
 .history-list {
   list-style: none;
@@ -209,17 +287,49 @@ header .subtitle {
   30% { border-color: var(--red); }
 }
 
-/* Protocol event styling */
 .proto-out { color: var(--green); font-weight: 600; }
 .proto-in { color: var(--blue); font-weight: 600; }
 .proto-summary { color: var(--text-muted); font-weight: 400; }
 
-#protocolEvents {
-  max-height: 240px;
+#protocolEvents { max-height: 240px; }
+
+.copy-link {
+  position: fixed;
+  top: 0.75rem;
+  right: 0.75rem;
+  font-size: 0.75rem;
+  font-family: var(--mono);
+  color: var(--text-muted);
+  cursor: pointer;
+  text-decoration: none;
+  z-index: 10;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  user-select: none;
+}
+
+.copy-link:hover {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+
+#stageContainer {
+  display: contents;
+}
+
+#stageContainer .stage-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.875rem 1rem;
 }
 </style>
 </head>
 <body>
+
+<a class="copy-link" id="copyDump">copy current</a>
 
 <div id="banner" class="banner">Dashboard disconnected &mdash; retrying&hellip;</div>
 
@@ -230,129 +340,83 @@ header .subtitle {
   </h1>
   <div class="subtitle">
     <span id="area"></span>
-    <span id="uptime"></span>
   </div>
 </header>
 
-<div class="card">
-  <div class="card-title">Connection</div>
-  <div class="row">
-    <span class="label">Status</span>
-    <span class="value" id="connStatus">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Server</span>
-    <span class="value" id="serverAddr">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Last Ping</span>
-    <span class="value" id="lastPing">&mdash;</span>
-  </div>
-</div>
+<div class="grid">
 
-<div class="card">
-  <div class="card-title">State Machine</div>
-  <div class="row">
-    <span class="label">State</span>
-    <span class="state-badge idle" id="stateBadge">&mdash;</span>
+  <div class="card">
+    <div class="card-title">Connection</div>
+    <div class="row">
+      <span class="label">Status</span>
+      <span class="value" id="connStatus">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Server</span>
+      <span class="value" id="serverAddr">&mdash;</span>
+    </div>
   </div>
-  <div class="row">
-    <span class="label">Feedback</span>
-    <span class="value" id="feedbackState">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">In state for</span>
-    <span class="value" id="stateAge">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Interactions</span>
-    <span class="value" id="interactions">0</span>
-  </div>
-</div>
 
-<div class="card">
-  <div class="card-title">Voice Activity Detection</div>
-  <div class="row">
-    <span class="label">Mode</span>
-    <span class="value" id="vadMode">&mdash;</span>
+  <div class="card">
+    <div class="card-title">State Machine</div>
+    <div class="row">
+      <span class="label">State</span>
+      <span class="state-badge idle" id="stateBadge">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Feedback</span>
+      <span class="value" id="feedbackState">&mdash;</span>
+    </div>
   </div>
-  <div class="row">
-    <span class="label">Phase</span>
-    <span class="value" id="vadPhase">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Attack Threshold</span>
-    <span class="value" id="vadAttackThreshold">&mdash;</span>
-    <span class="threshold-control" id="attackControl" style="display:none">
-      <input type="number" id="attackInput" min="1" max="65535" placeholder="value">
-      <button id="attackBtn">Set</button>
-    </span>
-  </div>
-  <div class="row">
-    <span class="label">Sustain Threshold</span>
-    <span class="value" id="vadSustainThreshold">&mdash;</span>
-    <span class="threshold-control" id="sustainControl" style="display:none">
-      <input type="number" id="sustainInput" min="1" max="65535" placeholder="value">
-      <button id="sustainBtn">Set</button>
-    </span>
-  </div>
-  <div class="row">
-    <span class="label">Energy</span>
-    <span class="value" id="vadEnergy">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Triggered</span>
-    <span class="value" id="vadTriggered">&mdash;</span>
-  </div>
-  <div class="sparkline-wrap">
-    <canvas id="sparkline"></canvas>
-  </div>
-</div>
 
-<div class="card">
-  <div class="card-title">Audio</div>
-  <div class="row">
-    <span class="label">Device</span>
-    <span class="value" id="audioDevice">&mdash;</span>
+  <div class="card">
+    <div class="card-title">Frame Timing</div>
+    <div class="row">
+      <span class="label">Work / frame</span>
+      <span class="value" id="workCurrent">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Avg (last 50)</span>
+      <span class="value" id="workAvg">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Max (last 50)</span>
+      <span class="value" id="workMax">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Headroom</span>
+      <span class="value" id="workHeadroom">&mdash;</span>
+    </div>
   </div>
-  <div class="row">
-    <span class="label">Format</span>
-    <span class="value" id="audioFormat">&mdash;</span>
-  </div>
-</div>
 
-<div class="card">
-  <div class="card-title">Frame Timing</div>
-  <div class="row">
-    <span class="label">Work / frame</span>
-    <span class="value" id="workCurrent">&mdash;</span>
+  <div class="card">
+    <div class="card-title">Audio</div>
+    <div class="row">
+      <span class="label">Device</span>
+      <span class="value" id="audioDevice">&mdash;</span>
+    </div>
+    <div class="row">
+      <span class="label">Format</span>
+      <span class="value" id="audioFormat">&mdash;</span>
+    </div>
   </div>
-  <div class="row">
-    <span class="label">Avg (last 50)</span>
-    <span class="value" id="workAvg">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Max (last 50)</span>
-    <span class="value" id="workMax">&mdash;</span>
-  </div>
-  <div class="row">
-    <span class="label">Headroom</span>
-    <span class="value" id="workHeadroom">&mdash;</span>
-  </div>
-</div>
 
-<div class="card">
-  <div class="card-title">Protocol Events</div>
-  <ul class="history-list" id="protocolEvents">
-    <li><span class="ts">waiting for data&hellip;</span></li>
-  </ul>
-</div>
+  <div id="stageContainer"></div>
 
-<div class="card">
-  <div class="card-title">State History</div>
-  <ul class="history-list" id="stateHistory">
-    <li><span class="ts">waiting for data&hellip;</span></li>
-  </ul>
+  <div class="card">
+    <div class="card-title">Protocol Events</div>
+    <ul class="history-list" id="protocolEvents">
+      <li><span class="ts">waiting for data&hellip;</span></li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <div class="card-title">State History</div>
+    <ul class="history-list" id="stateHistory">
+      <li><span class="ts">waiting for data&hellip;</span></li>
+    </ul>
+  </div>
+
 </div>
 
 <script type="module" src="js/app.js"></script>

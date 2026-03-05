@@ -111,6 +111,9 @@ fn run(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     service.set_sse_clients(Arc::clone(&sse_clients));
+    diagnostics.lock().unwrap().set_stage_names(
+        service.stage_names().into_iter().map(String::from).collect(),
+    );
 
     // Outer loop: connection lifecycle
     loop {
@@ -135,9 +138,10 @@ fn run_session(service: &mut SatelliteService, diagnostics: &SharedDiagnostics) 
     let mut feedback_state = FeedbackState::Idle;
     service.execute(&Action::SetFeedback(FeedbackState::Idle)).ok();
 
-    // Mark connected + initial state
+    // Mark connected + initial state; abort any stale session from a prior connection
     {
         let mut d = diagnostics.lock().unwrap();
+        d.abort_active_session();
         d.connected = true;
         d.last_state_change = Instant::now();
     }
@@ -163,13 +167,17 @@ fn run_session(service: &mut SatelliteService, diagnostics: &SharedDiagnostics) 
 
         if new_state != state {
             log::info!("State: {:?} -> {:?}", state, new_state);
-            diagnostics.lock().unwrap().last_state_change = Instant::now();
-
-            // Track completed interactions (reached Processing/Responding, now returning to Idle)
-            if new_state == SatelliteState::Idle
-                && matches!(state, SatelliteState::Processing | SatelliteState::Responding)
             {
-                diagnostics.lock().unwrap().interaction_count += 1;
+                let mut d = diagnostics.lock().unwrap();
+                d.last_state_change = Instant::now();
+                d.on_state_change(&state, &new_state);
+
+                // Track completed interactions (reached Processing/Responding, now returning to Idle)
+                if new_state == SatelliteState::Idle
+                    && matches!(state, SatelliteState::Processing | SatelliteState::Responding)
+                {
+                    d.interaction_count += 1;
+                }
             }
         }
 

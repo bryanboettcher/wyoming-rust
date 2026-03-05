@@ -21,5 +21,6 @@ hound = "3"
 libc = "0.2"
 rppal = "0.19"
 alsa = "0.9"
+realfft = "3"
 
 [dev-dependencies]

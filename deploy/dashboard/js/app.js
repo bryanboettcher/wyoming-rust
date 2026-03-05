@@ -1,138 +1,48 @@
-/**
- * Wyoming Satellite Dashboard — main application module.
- *
- * Connects to the satellite via SSE for real-time tick data and protocol events.
- * Falls back to 1s polling if SSE is unavailable.
- */
-
-import { drawSparkline } from './sparkline.js';
 import { Timeline } from './timeline.js';
+import {
+  $, stateClass, timeStr, formatDuration,
+  stateLog, workUsHistory, WORK_HISTORY_SIZE,
+  lastState, setLastState,
+  setSnapshotData, setCurrentTick,
+  stageRenderers,
+} from './state.js';
+import { getRenderer } from './renderers/registry.js';
+import { initDump } from './dump.js';
 
-// ── Configuration ──────────────────────────────────────────────────────────
-const MAX_ENERGY_SAMPLES = 3000; // ~60s at 50Hz
-const SPARKLINE_VISIBLE = 500;   // visible window in sparkline (~10s)
 const POLL_FALLBACK_MS = 1000;
-
-// ── State ──────────────────────────────────────────────────────────────────
-let attackThreshold = null;
-let sustainThreshold = null;
-const energyHistory = [];
-const stateLog = [];
-const workUsHistory = [];  // rolling window for timing stats
-const WORK_HISTORY_SIZE = 50;
-let lastState = null;
-let sparklineDirty = false;
-
-// ── DOM refs ───────────────────────────────────────────────────────────────
-const $ = id => document.getElementById(id);
-
-// ── Timeline ───────────────────────────────────────────────────────────────
 const timeline = new Timeline($('protocolEvents'));
 
-// ── Helpers ────────────────────────────────────────────────────────────────
-function formatDuration(secs) {
-  if (secs == null) return '\u2014';
-  if (secs < 1) return '<1s';
-  if (secs < 60) return Math.floor(secs) + 's';
-  const m = Math.floor(secs / 60);
-  const s = Math.floor(secs % 60);
-  if (m < 60) return m + 'm ' + s + 's';
-  const h = Math.floor(m / 60);
-  return h + 'h ' + (m % 60) + 'm';
-}
-
-function formatAgo(secs) {
-  if (secs == null) return '\u2014';
-  return formatDuration(secs) + ' ago';
-}
-
-function stateClass(s) {
-  const lower = (s || '').toLowerCase();
-  if (lower === 'idle') return 'idle';
-  if (lower === 'streaming') return 'streaming';
-  if (lower === 'processing') return 'processing';
-  if (lower === 'responding') return 'responding';
-  return 'idle';
-}
-
-function timeStr() {
-  return new Date().toLocaleTimeString([], {
-    hour: '2-digit', minute: '2-digit', second: '2-digit'
-  });
-}
-
-// ── Sparkline rendering (throttled via rAF) ────────────────────────────────
-function scheduleSparkline() {
-  if (!sparklineDirty) {
-    sparklineDirty = true;
-    requestAnimationFrame(() => {
-      sparklineDirty = false;
-      const visible = energyHistory.slice(-SPARKLINE_VISIBLE);
-      drawSparkline($('sparkline'), visible, attackThreshold, sustainThreshold, SPARKLINE_VISIBLE);
-    });
-  }
-}
-
-window.addEventListener('resize', scheduleSparkline);
-
-// ── State history rendering ────────────────────────────────────────────────
-function renderHistory() {
-  const ul = $('stateHistory');
-  if (stateLog.length === 0) {
-    ul.innerHTML = '<li><span class="ts">no transitions yet</span></li>';
-    return;
-  }
-  ul.innerHTML = stateLog.map(e =>
-    '<li><span class="ts">' + e.time + '</span><span>' +
-    (e.from || '?') + ' \u2192 ' + e.to + '</span></li>'
-  ).join('');
-}
-
-// ── SSE event handlers ─────────────────────────────────────────────────────
 function handleSnapshot(data) {
+  setSnapshotData(data);
   $('satName').textContent = data.satellite_name || 'Wyoming Satellite';
   if (data.area) $('area').textContent = data.area;
   $('serverAddr').textContent = data.server_address || '\u2014';
   $('audioDevice').textContent = data.audio_device || '\u2014';
   $('audioFormat').textContent = data.audio_format || '\u2014';
-  $('vadMode').textContent = data.vad_mode || '\u2014';
 
-  attackThreshold = data.attack_threshold;
-  sustainThreshold = data.sustain_threshold;
-  $('vadAttackThreshold').textContent = attackThreshold != null ? attackThreshold : '\u2014';
-  $('vadSustainThreshold').textContent = sustainThreshold != null ? sustainThreshold : '\u2014';
+  // Create dynamic stage cards
+  const container = $('stageContainer');
+  container.innerHTML = '';
+  // Destroy and clear old renderers
+  for (const key of Object.keys(stageRenderers)) {
+    if (stageRenderers[key].destroy) stageRenderers[key].destroy();
+    delete stageRenderers[key];
+  }
 
-  // Show threshold controls for energy VAD
-  const isEnergy = data.vad_mode === 'energy';
-  $('attackControl').style.display = isEnergy ? '' : 'none';
-  $('sustainControl').style.display = isEnergy ? '' : 'none';
+  if (data.stages && data.stages.length > 0) {
+    for (const stageName of data.stages) {
+      const renderer = getRenderer(stageName);
+      const card = renderer.create(stageName);
+      container.appendChild(card);
+      stageRenderers[stageName] = renderer;
+    }
+  }
 }
 
 function handleTick(data) {
-  // Energy history
-  const energy = data.energy;
-  energyHistory.push(energy != null ? energy : 0);
-  if (energyHistory.length > MAX_ENERGY_SAMPLES) energyHistory.shift();
+  setCurrentTick(data);
 
-  // VAD display
-  const phaseEl = $('vadPhase');
-  if (data.phase === 'attack') {
-    phaseEl.innerHTML = '<span class="dot dot-red"></span>attack';
-  } else if (data.phase === 'sustain') {
-    phaseEl.innerHTML = '<span class="dot dot-amber"></span>sustain';
-  } else {
-    phaseEl.textContent = '\u2014';
-  }
-
-  $('vadEnergy').textContent = energy != null ? energy : '\u2014';
-  const triggered = $('vadTriggered');
-  if (data.triggered) {
-    triggered.innerHTML = '<span class="dot dot-amber"></span>Yes';
-  } else {
-    triggered.textContent = 'No';
-  }
-
-  // State
+  // State badge
   const state = data.state;
   const badge = $('stateBadge');
   badge.textContent = state || '\u2014';
@@ -144,14 +54,14 @@ function handleTick(data) {
   dot.className = 'dot ' + (data.connected ? 'dot-green' : 'dot-red');
   $('connStatus').textContent = data.connected ? 'Connected' : 'Disconnected';
 
-  // State transitions
+  // State history
   if (state && state !== lastState) {
     stateLog.unshift({ time: timeStr(), from: lastState, to: state });
     if (stateLog.length > 30) stateLog.pop();
     renderHistory();
-    lastState = state;
+    setLastState(state);
   }
-  if (lastState === null) lastState = state;
+  if (lastState === null) setLastState(state);
 
   // Frame timing
   if (data.work_us != null) {
@@ -165,43 +75,81 @@ function handleTick(data) {
     $('workHeadroom').textContent = ((20000 - avg) / 1000).toFixed(1) + 'ms / 20ms';
   }
 
-  scheduleSparkline();
+  // Update dynamic stage cards
+  if (data.stages) {
+    for (const [stageName, stats] of Object.entries(data.stages)) {
+      const renderer = stageRenderers[stageName];
+      if (renderer) renderer.update(stats);
+    }
+  }
+}
+
+function renderHistory() {
+  const ul = $('stateHistory');
+  if (stateLog.length === 0) {
+    ul.innerHTML = '<li><span class="ts">no transitions yet</span></li>';
+    return;
+  }
+  ul.innerHTML = stateLog.map(e =>
+    '<li><span class="ts">' + e.time + '</span><span>' +
+    (e.from || '?') + ' \u2192 ' + e.to + '</span></li>'
+  ).join('');
+}
+
+function handleMel(base64Str) {
+  const renderer = stageRenderers['mfcc'];
+  if (renderer && renderer.pushMel) {
+    renderer.pushMel(base64Str);
+  }
 }
 
 function handleProtocol(data) {
   timeline.push(data);
 }
 
-// ── SSE Connection ─────────────────────────────────────────────────────────
 let pollInterval = null;
+let rollupInterval = null;
+
+async function fetchRollups() {
+  try {
+    const res = await fetch('/api/rollups');
+    if (!res.ok) return;
+    const entries = await res.json();
+    for (const renderer of Object.values(stageRenderers)) {
+      if (renderer.setRollups) renderer.setRollups(entries);
+    }
+  } catch {}
+}
 
 function connectSSE() {
   const es = new EventSource('/api/stream');
-
   es.addEventListener('snapshot', e => {
     $('banner').classList.remove('visible');
     handleSnapshot(JSON.parse(e.data));
+    fetchRollups();
+    if (!rollupInterval) {
+      rollupInterval = setInterval(fetchRollups, 60000);
+    }
   });
-
   es.addEventListener('tick', e => {
     handleTick(JSON.parse(e.data));
   });
-
+  es.addEventListener('mel', e => {
+    handleMel(e.data);
+  });
   es.addEventListener('protocol', e => {
     handleProtocol(JSON.parse(e.data));
   });
-
   es.onerror = () => {
     $('banner').classList.add('visible');
-    // EventSource will auto-reconnect. If it can't, fall back to polling.
     if (es.readyState === EventSource.CLOSED) {
       startPolling();
     }
   };
 }
 
-// ── Polling fallback ───────────────────────────────────────────────────────
 function startPolling() {
+  // Simple fallback: just poll snapshot + show basic info, no tick data
   if (pollInterval) return;
   pollInterval = setInterval(async () => {
     try {
@@ -210,112 +158,36 @@ function startPolling() {
       const data = await res.json();
       $('banner').classList.remove('visible');
 
-      // Map snapshot fields
       $('satName').textContent = data.satellite_name || 'Wyoming Satellite';
       const parts = [];
       if (data.area) parts.push(data.area);
       parts.push('up ' + formatDuration(data.uptime_seconds));
       $('area').textContent = parts.join(' \u00b7 ');
 
-      // Connection
-      const dot = $('connDot');
-      dot.className = 'dot ' + (data.connected ? 'dot-green' : 'dot-red');
+      const d = $('connDot');
+      d.className = 'dot ' + (data.connected ? 'dot-green' : 'dot-red');
       $('connStatus').textContent = data.connected ? 'Connected' : 'Disconnected';
       $('serverAddr').textContent = data.server_address || '\u2014';
-      $('lastPing').textContent = formatAgo(data.last_ping_secs);
 
-      // State
       const badge = $('stateBadge');
       badge.textContent = data.state || '\u2014';
       badge.className = 'state-badge ' + stateClass(data.state);
       $('feedbackState').textContent = data.feedback_state || '\u2014';
-      $('stateAge').textContent = formatDuration(data.last_state_change_secs);
-      $('interactions').textContent = data.interaction_count != null ? data.interaction_count : '\u2014';
-
-      // VAD
-      $('vadMode').textContent = data.vad_mode || '\u2014';
-      attackThreshold = data.vad_attack_threshold;
-      sustainThreshold = data.vad_sustain_threshold;
-      $('vadAttackThreshold').textContent = attackThreshold != null ? attackThreshold : '\u2014';
-      $('vadSustainThreshold').textContent = sustainThreshold != null ? sustainThreshold : '\u2014';
-      const isEnergy = data.vad_mode === 'energy';
-      $('attackControl').style.display = isEnergy ? '' : 'none';
-      $('sustainControl').style.display = isEnergy ? '' : 'none';
-
-      const phaseEl = $('vadPhase');
-      if (data.vad_phase === 'attack') {
-        phaseEl.innerHTML = '<span class="dot dot-red"></span>attack';
-      } else if (data.vad_phase === 'sustain') {
-        phaseEl.innerHTML = '<span class="dot dot-amber"></span>sustain';
-      } else {
-        phaseEl.textContent = '\u2014';
-      }
-
-      const energy = data.vad_current_energy;
-      $('vadEnergy').textContent = energy != null ? energy : '\u2014';
-      const triggeredEl = $('vadTriggered');
-      if (data.vad_triggered) {
-        triggeredEl.innerHTML = '<span class="dot dot-amber"></span>Yes';
-      } else {
-        triggeredEl.textContent = 'No';
-      }
-
-      energyHistory.push(energy != null ? energy : 0);
-      if (energyHistory.length > MAX_ENERGY_SAMPLES) energyHistory.shift();
-      scheduleSparkline();
-
-      // Audio
       $('audioDevice').textContent = data.audio_device || '\u2014';
       $('audioFormat').textContent = data.audio_format || '\u2014';
 
-      // State history
       if (data.state && data.state !== lastState) {
         stateLog.unshift({ time: timeStr(), from: lastState, to: data.state });
         if (stateLog.length > 30) stateLog.pop();
         renderHistory();
-        lastState = data.state;
+        setLastState(data.state);
       }
-      if (lastState === null) lastState = data.state;
+      if (lastState === null) setLastState(data.state);
     } catch (err) {
       $('banner').classList.add('visible');
     }
   }, POLL_FALLBACK_MS);
 }
 
-// ── Threshold tuning ───────────────────────────────────────────────────────
-async function setThresholdValue(inputId, endpoint) {
-  const input = $(inputId);
-  const val = parseInt(input.value, 10);
-  if (!val || val < 1 || val > 65535) {
-    flash(input, 'flash-err');
-    return;
-  }
-  try {
-    const res = await fetch(endpoint, { method: 'POST', body: String(val) });
-    if (!res.ok) throw new Error(res.status);
-    flash(input, 'flash-ok');
-    input.value = '';
-  } catch (err) {
-    flash(input, 'flash-err');
-  }
-}
-
-function flash(el, cls) {
-  el.classList.remove('flash-ok', 'flash-err');
-  void el.offsetWidth;
-  el.classList.add(cls);
-}
-
-$('attackBtn').addEventListener('click', () =>
-  setThresholdValue('attackInput', '/api/vad/attack_threshold'));
-$('attackInput').addEventListener('keydown', e => {
-  if (e.key === 'Enter') setThresholdValue('attackInput', '/api/vad/attack_threshold');
-});
-$('sustainBtn').addEventListener('click', () =>
-  setThresholdValue('sustainInput', '/api/vad/sustain_threshold'));
-$('sustainInput').addEventListener('keydown', e => {
-  if (e.key === 'Enter') setThresholdValue('sustainInput', '/api/vad/sustain_threshold');
-});
-
-// ── Init ───────────────────────────────────────────────────────────────────
+initDump(timeline);
 connectSSE();

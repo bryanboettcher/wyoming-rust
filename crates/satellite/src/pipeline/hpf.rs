@@ -1,4 +1,4 @@
-use super::{Stage, StatKey};
+use super::{Stage, StagePending, StatKey};
 
 /// Second-order Butterworth biquad high-pass filter.
 ///
@@ -48,9 +48,9 @@ fn compute_hpf_coefficients(cutoff_hz: f32, sample_rate: u32) -> (f32, f32, f32,
 }
 
 impl Stage for HighPassFilter {
-    fn process(&mut self, samples: &mut [i16]) {
+    fn process(&mut self, samples: &mut [i16]) -> bool {
         if samples.is_empty() {
-            return;
+            return true;
         }
 
         let pre_energy: i64 = samples.iter().map(|&s| (s as i64) * (s as i64)).sum();
@@ -78,9 +78,10 @@ impl Stage for HighPassFilter {
         };
         self.energy_removed_ema = self.energy_removed_ema * 0.95 + ratio * 0.05;
         self.stats_buf[0].1 = self.energy_removed_ema as f64;
+        true
     }
 
-    fn analyze(self) -> Self {
+    fn analyze(self, _pending: &mut StagePending) -> Self {
         self
     }
 
@@ -189,7 +190,7 @@ mod tests {
     #[test]
     fn analyze_returns_self() {
         let hpf = HighPassFilter::new(85.0, 16000);
-        let hpf2 = hpf.analyze();
+        let hpf2 = hpf.analyze(&mut StagePending::default());
         assert_eq!(hpf2.name(), "highpass");
     }
 

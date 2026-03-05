@@ -13,7 +13,7 @@ use crate::pipeline;
 use crate::connection::{connect_with_retry, map_server_event, Connection, ConnectionError, HandshakeResult};
 use crate::diagnostics::{push_sse, SharedDiagnostics, SseClients};
 use crate::feedback::{self, Feedback, FanoutFeedback};
-use crate::hardware::{AudioError, AudioSink, AudioSource, Vad};
+use crate::hardware::{AudioError, AudioSink, AudioSource};
 use crate::state::{Action, FeedbackState, SatelliteInput, SatelliteState};
 
 /// How the satellite establishes its connection to HA.
@@ -34,7 +34,6 @@ pub struct SatelliteService {
     snd_programs: Vec<SndProgram>,
     mic: Box<dyn AudioSource>,
     spk: Box<dyn AudioSink>,
-    vad: Box<dyn Vad>,
     feedback: Box<dyn Feedback>,
     audio_format: AudioFormat,
     /// Format from the most recent server `audio-start` event (TTS playback).
@@ -45,6 +44,10 @@ pub struct SatelliteService {
     mic_running: bool,
     /// Timestamp of last voice activity detection.
     last_vad_active: Instant,
+    /// Timestamp when the current streaming session started, for watchdog.
+    streaming_started: Instant,
+    /// Maximum streaming duration before forced timeout. Duration::ZERO = no limit.
+    max_stream_duration: Duration,
     /// Ring buffer of recent audio frames for pre-roll before wake word.
     preroll_buffer: VecDeque<Vec<u8>>,
     /// Maximum number of frames in the pre-roll buffer.
@@ -57,6 +60,8 @@ pub struct SatelliteService {
     tick_post_read: Instant,
     runner: Box<dyn pipeline::Runner>,
     sample_buf: Vec<i16>,
+    /// Counter for subsampling mel spectrogram SSE events (send every 5th frame = 10Hz).
+    mel_sse_counter: u32,
 }
 
 impl SatelliteService {
@@ -104,7 +109,6 @@ impl SatelliteService {
 
         let mic = create_audio_source(config)?;
         let spk = create_audio_sink(config)?;
-        let vad = create_vad(config)?;
         let feedback = create_feedback(config);
 
         let mode = if config.server.mode == "listen" {
@@ -116,10 +120,10 @@ impl SatelliteService {
             ConnectionMode::Connect
         };
 
-        let silence_timeout = Duration::from_millis(config.vad.silence_timeout_ms());
+        let silence_timeout = Duration::from_millis(config.pipeline.silence_timeout_ms);
 
         // Compute pre-roll buffer capacity from buffer_seconds and chunk_ms
-        let buffer_seconds = config.vad.buffer_seconds();
+        let buffer_seconds = config.pipeline.buffer_seconds;
         let preroll_max_frames = if buffer_seconds > 0.0 && config.audio.chunk_ms > 0 {
             let chunk_secs = config.audio.chunk_ms as f64 / 1000.0;
             (buffer_seconds / chunk_secs).ceil() as usize
@@ -135,13 +139,18 @@ impl SatelliteService {
             snd_programs,
             mic,
             spk,
-            vad,
             feedback,
             audio_format,
             playback_format: audio_format,
             silence_timeout,
             mic_running: false,
             last_vad_active: Instant::now(),
+            streaming_started: Instant::now(),
+            max_stream_duration: if config.pipeline.max_stream_seconds > 0 {
+                Duration::from_secs(config.pipeline.max_stream_seconds)
+            } else {
+                Duration::ZERO
+            },
             preroll_buffer: VecDeque::with_capacity(preroll_max_frames),
             preroll_max_frames,
             config: config.clone(),
@@ -149,12 +158,18 @@ impl SatelliteService {
             tick_post_read: Instant::now(),
             runner: Box::new(pipeline::SimpleRunner::new(&config.pipeline, config.audio.rate)),
             sample_buf: Vec::new(),
+            mel_sse_counter: 0,
         })
     }
 
     /// Register SSE client list for real-time event streaming.
     pub fn set_sse_clients(&mut self, clients: SseClients) {
         self.sse_clients = Some(clients);
+    }
+
+    /// Returns pipeline stage names for diagnostics snapshot.
+    pub fn stage_names(&self) -> Vec<&'static str> {
+        self.runner.stage_names()
     }
 
     /// Block until a connection is established and the handshake completes.
@@ -268,101 +283,66 @@ impl SatelliteService {
         self.tick_post_read = Instant::now();
 
         match state {
-            // IDLE: either poll GPIO or read mic frames (depending on VAD mode)
             SatelliteState::Idle => {
-                if self.vad.needs_continuous_capture() {
-                    // Energy/AlwaysOn: mic must be running to detect voice
-                    if !self.mic_running {
-                        if let Err(e) = self.mic.start() {
-                            log::error!("Failed to start mic for continuous VAD: {}", e);
-                            return Err(e.into());
-                        }
-                        self.mic_running = true;
-                        log::debug!("Mic started for continuous-capture VAD");
+                // Mic always runs in idle for pipeline-based detection
+                if !self.mic_running {
+                    if let Err(e) = self.mic.start() {
+                        log::error!("Failed to start mic: {}", e);
+                        return Err(e.into());
                     }
+                    self.mic_running = true;
+                    log::debug!("Mic started for pipeline detection");
+                }
 
-                    // Read a frame, poll VAD first (borrow), then move into pre-roll buffer
-                    match self.mic.read_frame() {
-                        Ok(mut frame) => {
-                            self.tick_post_read = Instant::now();
+                match self.mic.read_frame() {
+                    Ok(mut frame) => {
+                        self.tick_post_read = Instant::now();
 
-                            // Apply audio pipeline before VAD
-                            if self.runner.is_active() {
-                                pipeline::pcm16le_to_samples(&frame, &mut self.sample_buf);
-                                self.runner.process_frame(&mut self.sample_buf);
-                                pipeline::samples_to_pcm16le(&self.sample_buf, &mut frame);
-                            }
+                        // Run audio through pipeline (filters + detection)
+                        pipeline::pcm16le_to_samples(&frame, &mut self.sample_buf);
+                        let triggered = self.runner.process_frame(&mut self.sample_buf);
+                        pipeline::samples_to_pcm16le(&self.sample_buf, &mut frame);
 
-                            // Poll VAD before buffering so we can borrow frame without cloning
-                            if self.vad.poll(Some(&frame)) {
-                                self.last_vad_active = Instant::now();
-                                // Still buffer the frame so FlushPreRollBuffer includes it
-                                if self.preroll_max_frames > 0 {
-                                    if self.preroll_buffer.len() >= self.preroll_max_frames {
-                                        self.preroll_buffer.pop_front();
-                                    }
-                                    self.preroll_buffer.push_back(frame);
-                                }
-                                return Ok(Some(SatelliteInput::VoiceDetected));
-                            }
-
-                            // No voice detected: move frame into ring buffer (evict oldest if full)
+                        if triggered {
+                            self.last_vad_active = Instant::now();
                             if self.preroll_max_frames > 0 {
                                 if self.preroll_buffer.len() >= self.preroll_max_frames {
                                     self.preroll_buffer.pop_front();
                                 }
                                 self.preroll_buffer.push_back(frame);
                             }
+                            return Ok(Some(SatelliteInput::VoiceDetected));
                         }
-                        Err(AudioError::EndOfStream) => {
-                            // WAV file exhausted in Idle — trigger silence timeout for graceful exit
-                            log::info!("Audio source exhausted in Idle, triggering silence timeout");
-                            return Ok(Some(SatelliteInput::SilenceTimeout));
-                        }
-                        Err(e) => return Err(e.into()),
-                    }
 
-                    // Check for server messages (non-blocking)
-                    match self.poll_server_event() {
-                        Ok(Some(event)) => {
-                            if let Some(input) = self.handle_server_event(&event) {
-                                return Ok(Some(input));
+                        // No voice detected: buffer for pre-roll
+                        if self.preroll_max_frames > 0 {
+                            if self.preroll_buffer.len() >= self.preroll_max_frames {
+                                self.preroll_buffer.pop_front();
                             }
-                        }
-                        Ok(None) => {}
-                        Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
-                            return Ok(Some(SatelliteInput::Disconnected));
-                        }
-                        Err(e) => {
-                            log::warn!("Error reading from server in Idle: {}", e);
-                            return Ok(Some(SatelliteInput::Disconnected));
+                            self.preroll_buffer.push_back(frame);
                         }
                     }
-                } else {
-                    // GPIO mode: poll without audio
-                    if self.vad.poll(None) {
-                        self.last_vad_active = Instant::now();
-                        return Ok(Some(SatelliteInput::VoiceDetected));
+                    Err(AudioError::EndOfStream) => {
+                        log::info!("Audio source exhausted in Idle, triggering silence timeout");
+                        return Ok(Some(SatelliteInput::SilenceTimeout));
                     }
+                    Err(e) => return Err(e.into()),
+                }
 
-                    // Sleep briefly to avoid busy-waiting on GPIO poll
-                    std::thread::sleep(Duration::from_millis(100));
-
-                    // Check for server messages (non-blocking)
-                    match self.poll_server_event() {
-                        Ok(Some(event)) => {
-                            if let Some(input) = self.handle_server_event(&event) {
-                                return Ok(Some(input));
-                            }
+                // Check for server messages (non-blocking)
+                match self.poll_server_event() {
+                    Ok(Some(event)) => {
+                        if let Some(input) = self.handle_server_event(&event) {
+                            return Ok(Some(input));
                         }
-                        Ok(None) => {}
-                        Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
-                            return Ok(Some(SatelliteInput::Disconnected));
-                        }
-                        Err(e) => {
-                            log::warn!("Error reading from server in Idle: {}", e);
-                            return Ok(Some(SatelliteInput::Disconnected));
-                        }
+                    }
+                    Ok(None) => {}
+                    Err(ConnectionError::Protocol(ProtocolError::ConnectionClosed)) => {
+                        return Ok(Some(SatelliteInput::Disconnected));
+                    }
+                    Err(e) => {
+                        log::warn!("Error reading from server in Idle: {}", e);
+                        return Ok(Some(SatelliteInput::Disconnected));
                     }
                 }
 
@@ -374,27 +354,22 @@ impl SatelliteService {
             | SatelliteState::Triggered
             | SatelliteState::Processing => {
                 // 1. Read one mic frame (~20ms block)
-                let frame = match self.mic.read_frame() {
+                let (frame, vad_active) = match self.mic.read_frame() {
                     Ok(mut f) => {
                         self.tick_post_read = Instant::now();
 
-                        // Apply audio pipeline (HPF, gate, AGC) before VAD
-                        if self.runner.is_active() {
-                            pipeline::pcm16le_to_samples(&f, &mut self.sample_buf);
-                            self.runner.process_frame(&mut self.sample_buf);
-                            pipeline::samples_to_pcm16le(&self.sample_buf, &mut f);
-                        }
+                        // Run audio through pipeline (filters + detection)
+                        pipeline::pcm16le_to_samples(&f, &mut self.sample_buf);
+                        let triggered = self.runner.process_frame(&mut self.sample_buf);
+                        pipeline::samples_to_pcm16le(&self.sample_buf, &mut f);
 
-                        Some(f)
+                        (Some(f), triggered)
                     }
                     Err(AudioError::EndOfStream) => {
                         if matches!(state, SatelliteState::Streaming) {
-                            // In Streaming: audio exhausted = silence timeout
                             log::info!("Audio source exhausted, triggering silence timeout");
                             return Ok(Some(SatelliteInput::SilenceTimeout));
                         }
-                        // In Triggered/Processing: audio exhausted but server is
-                        // still working. Block on server socket instead.
                         log::debug!("Audio source exhausted, waiting for server response");
                         match self.read_server_event() {
                             Ok(Some(event)) => {
@@ -416,16 +391,21 @@ impl SatelliteService {
                     Err(e) => return Err(e.into()),
                 };
 
-                // 2. Check VAD for silence timeout (before sending, to avoid move)
-                let vad_active = if let Some(ref f) = frame {
-                    self.vad.poll(Some(f))
-                } else {
-                    false
-                };
-
+                // 2. Pipeline already ran detection during frame processing above.
                 if vad_active {
                     self.last_vad_active = Instant::now();
                 } else if self.last_vad_active.elapsed() > self.silence_timeout {
+                    return Ok(Some(SatelliteInput::SilenceTimeout));
+                }
+
+                // 2b. Watchdog: force stop if streaming for too long (stuck detection).
+                if self.max_stream_duration > Duration::ZERO
+                    && self.streaming_started.elapsed() > self.max_stream_duration
+                {
+                    log::warn!(
+                        "Max stream duration exceeded ({:.0}s), forcing silence timeout",
+                        self.max_stream_duration.as_secs_f64()
+                    );
                     return Ok(Some(SatelliteInput::SilenceTimeout));
                 }
 
@@ -510,16 +490,9 @@ impl SatelliteService {
                 }
             }
             Action::StopCapture => {
-                if self.vad.needs_continuous_capture() {
-                    // Keep mic running for pre-roll buffer; just reset VAD state
-                    log::debug!("Action: StopCapture (continuous VAD: mic stays running, VAD reset)");
-                    self.vad.reset();
-                } else {
-                    log::debug!("Action: StopCapture");
-                    self.mic.stop()?;
-                    self.mic_running = false;
-                    self.vad.reset();
-                }
+                // Mic stays running for pre-roll buffer; just reset pipeline detection state
+                log::debug!("Action: StopCapture (pipeline reset, mic stays running)");
+                self.runner.reset();
             }
             Action::SendRunPipeline => {
                 log::debug!("Action: SendRunPipeline");
@@ -563,6 +536,7 @@ impl SatelliteService {
             }
             Action::SendStreamingStarted => {
                 log::debug!("Action: SendStreamingStarted");
+                self.streaming_started = Instant::now();
                 let conn = self.conn.as_mut().expect("no connection established");
                 conn.send(StreamingStarted)?;
                 self.push_protocol_out("streaming-started", "");
@@ -612,63 +586,103 @@ impl SatelliteService {
     ) {
         let mut d = diag.lock().unwrap();
 
-        // Apply pending thresholds from HTTP API
-        if let Some(t) = d.pending_attack_threshold.take() {
-            self.vad.set_attack_threshold(t);
-            d.vad_attack_threshold = Some(t);
-            log::info!("VAD attack threshold updated to {} via HTTP", t);
+        // Apply pending ratio changes from HTTP API
+        {
+            let pending = self.runner.pending();
+            if let Some(r) = d.pending_attack_ratio.take() {
+                pending.attack_ratio = Some(r);
+                log::info!("Attack ratio {} queued for next analyze cycle", r);
+            }
+            if let Some(r) = d.pending_sustain_ratio.take() {
+                pending.sustain_ratio = Some(r);
+                log::info!("Sustain ratio {} queued for next analyze cycle", r);
+            }
         }
-        if let Some(t) = d.pending_sustain_threshold.take() {
-            self.vad.set_sustain_threshold(t);
-            d.vad_sustain_threshold = Some(t);
-            log::info!("VAD sustain threshold updated to {} via HTTP", t);
+
+        if d.pending_reset {
+            d.pending_reset = false;
+            self.runner.reset();
+            log::info!("Pipeline reset via HTTP");
         }
 
         d.state = state.clone();
         d.feedback_state = *feedback_state;
         d.connected = self.conn.is_some();
-        d.vad_current_energy = self.vad.last_energy();
-        d.vad_phase = self.vad.phase().map(|s| s.to_string());
         if let Some(conn) = &self.conn {
             d.last_ping_received = conn.last_ping_received;
         }
 
-        // Push tick data to SSE clients
+        // Snapshot pipeline stats (needed for SSE + rollup)
+        let snapshot = self.runner.stats_snapshot();
+
+        // Send mel spectrogram SSE event at 10Hz (every 5th frame)
+        self.mel_sse_counter += 1;
+        if self.mel_sse_counter % 5 == 0 {
+            if let (Some(ref clients), Some(ref mel)) = (&self.sse_clients, &snapshot.mel_energies) {
+                let mut b64 = String::with_capacity(40);
+                base64_encode(mel, &mut b64);
+                push_sse(clients, "mel", &b64);
+            }
+        }
+
+        // Push tick data to SSE clients with structured stages
         if let Some(ref clients) = self.sse_clients {
-            let energy = self.vad.last_energy();
-            let phase = self.vad.phase().unwrap_or("-");
-            let active_threshold = match phase {
-                "sustain" => d.vad_sustain_threshold,
-                _ => d.vad_attack_threshold,
-            };
-            let triggered = match (energy, active_threshold) {
-                (Some(e), Some(t)) => e >= t,
-                _ => false,
-            };
             let work_us = self.tick_post_read.elapsed().as_micros() as u32;
-            let pipeline_stats = if self.runner.is_active() {
-                let snapshot = self.runner.stats_snapshot();
-                let mut s = String::new();
-                for &(stage_name, key, val) in &snapshot.entries {
-                    use std::fmt::Write;
-                    write!(s, r#","{}.{}":{:.4}"#, stage_name, key.name(), val).ok();
+
+            // Build structured stages JSON: {"stage_name": {"key": val, ...}, ...}
+            let mut stages_json = String::from("{");
+            let mut current_stage: Option<&str> = None;
+            let mut first_stage = true;
+            let mut first_stat = true;
+            for &(stage_name, key, val) in &snapshot.entries {
+                use std::fmt::Write;
+                if Some(stage_name) != current_stage {
+                    if current_stage.is_some() {
+                        stages_json.push('}');
+                    }
+                    if !first_stage {
+                        stages_json.push(',');
+                    }
+                    write!(stages_json, r#""{}":{{"#, stage_name).ok();
+                    current_stage = Some(stage_name);
+                    first_stage = false;
+                    first_stat = true;
                 }
-                s
-            } else {
-                String::new()
-            };
+                if !first_stat {
+                    stages_json.push(',');
+                }
+                write!(stages_json, r#""{}":{:.4}"#, key.name(), val).ok();
+                first_stat = false;
+            }
+            if current_stage.is_some() {
+                stages_json.push('}');
+            }
+            stages_json.push('}');
+
             let json = format!(
-                r#"{{"energy":{},"phase":"{}","state":"{:?}","feedback":"{:?}","triggered":{},"connected":{},"work_us":{}{}}}"#,
-                energy.map(|e| e.to_string()).unwrap_or_else(|| "null".into()),
-                phase,
+                r#"{{"state":"{:?}","feedback":"{:?}","connected":{},"work_us":{},"stages":{}}}"#,
                 state,
                 feedback_state,
-                triggered,
                 d.connected,
                 work_us,
-                pipeline_stats,
+                stages_json,
             );
             push_sse(clients, "tick", &json);
+        }
+
+        // Feed rollup accumulator from pipeline stats
+        {
+            use crate::pipeline::StatKey;
+            use crate::diagnostics::extract_stat;
+            let energy = extract_stat(&snapshot.entries, StatKey::Energy);
+            let floor = extract_stat(&snapshot.entries, StatKey::NoiseFloor);
+            let triggered = extract_stat(&snapshot.entries, StatKey::Triggered) > 0.5;
+            let zcr = extract_stat(&snapshot.entries, StatKey::ZeroCrossingRate);
+            let speech_band = extract_stat(&snapshot.entries, StatKey::SpeechBandRatio);
+            let centroid = extract_stat(&snapshot.entries, StatKey::SpectralCentroid);
+            let flatness = extract_stat(&snapshot.entries, StatKey::SpectralFlatness);
+            d.feed_rollup(energy, floor, triggered, zcr, speech_band, centroid, flatness);
+            d.session_tracker.feed_tick(energy, zcr, speech_band, floor);
         }
     }
 
@@ -721,6 +735,25 @@ fn summarize_event(event: &wyoming::event::Event) -> String {
 }
 
 // ============================================================================
+// Base64 encoder (minimal, no external dependency)
+// ============================================================================
+
+const B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn base64_encode(data: &[u8], out: &mut String) {
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_CHARS[((n >> 18) & 63) as usize] as char);
+        out.push(B64_CHARS[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { B64_CHARS[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { B64_CHARS[(n & 63) as usize] as char } else { '=' });
+    }
+}
+
+// ============================================================================
 // Hardware Factory Functions
 // ============================================================================
 
@@ -758,31 +791,6 @@ fn create_audio_sink(config: &Config) -> Result<Box<dyn AudioSink>, Box<dyn std:
         )))
     } else {
         Ok(Box::new(crate::hardware::NullSink))
-    }
-}
-
-fn create_vad(config: &Config) -> Result<Box<dyn Vad>, Box<dyn std::error::Error>> {
-    use crate::config::VadConfig;
-
-    match &config.vad {
-        VadConfig::AlwaysOn { .. } => {
-            log::info!("VAD mode: AlwaysOn");
-            Ok(Box::new(crate::hardware::AlwaysOnVad::new()))
-        }
-        VadConfig::Gpio { pin, .. } => {
-            log::info!("VAD mode: GPIO (pin {})", pin);
-            match crate::hardware::GpioVad::new(*pin) {
-                Ok(vad) => Ok(Box::new(vad)),
-                Err(e) => {
-                    log::warn!("GPIO VAD unavailable ({}), falling back to AlwaysOn", e);
-                    Ok(Box::new(crate::hardware::AlwaysOnVad::new()))
-                }
-            }
-        }
-        VadConfig::Energy { attack_threshold, sustain_threshold, .. } => {
-            log::info!("VAD mode: Energy (attack={}, sustain={})", attack_threshold, sustain_threshold);
-            Ok(Box::new(crate::hardware::EnergyVad::new(*attack_threshold, *sustain_threshold)))
-        }
     }
 }
 
@@ -833,4 +841,51 @@ fn create_feedback(config: &Config) -> Box<dyn Feedback> {
     }
 
     Box::new(fanout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_encode_empty() {
+        let mut out = String::new();
+        base64_encode(&[], &mut out);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn base64_encode_three_bytes() {
+        // "Man" → "TWFu"
+        let mut out = String::new();
+        base64_encode(b"Man", &mut out);
+        assert_eq!(out, "TWFu");
+    }
+
+    #[test]
+    fn base64_encode_two_bytes_padding() {
+        // "Ma" → "TWE="
+        let mut out = String::new();
+        base64_encode(b"Ma", &mut out);
+        assert_eq!(out, "TWE=");
+    }
+
+    #[test]
+    fn base64_encode_one_byte_padding() {
+        // "M" → "TQ=="
+        let mut out = String::new();
+        base64_encode(b"M", &mut out);
+        assert_eq!(out, "TQ==");
+    }
+
+    #[test]
+    fn base64_encode_26_mel_bytes() {
+        let data = vec![128u8; 26];
+        let mut out = String::new();
+        base64_encode(&data, &mut out);
+        // 26 bytes = 8 full chunks (24 bytes) + 1 partial (2 bytes)
+        // 8*4 + 4 = 36 chars
+        assert_eq!(out.len(), 36);
+        assert!(out.ends_with('='), "26 bytes should produce padding");
+    }
 }
